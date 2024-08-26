@@ -192,9 +192,9 @@ print_banner() {
     echo -e "${BOLD}${CYAN}$banner_text${RESET}"
 
 # If target not blank then log the banner to the log file
-if [ -z "$1" ]; then
-    # Strip all ANSI escape codes from the banner and print to the log file
-    echo -e "$banner_text" | sed "s,\x1B\[[0-9;]*[a-zA-Z],,g" >> "$LOG_FILE"
+if [ -n "$TARGET" ] && [ -n "$TARGET_TYPE" ]; then
+  # Strip all ANSI escape codes from the banner and print to the log file
+  echo -e "$banner_text" | sed "s,\x1B\[[0-9;]*[a-zA-Z],,g" >> "$LOG_FILE"
 fi
 }
 
@@ -213,33 +213,32 @@ fi
 
 
 # Function to validate the target domain, IPv4, or IPv6 address
-# Function to validate the target domain, IPv4, or IPv6 address
 validate_target() {
-    local target="$1"
+    # Regex for valid domain name (simple check)
+    local domain_regex="^([a-zA-Z0-9](-*[a-zA-Z0-9])*\.)+[a-zA-Z]{2,}$"
 
     # Regex for valid IPv4 address
     local ipv4_regex="^([0-9]{1,3}\.){3}[0-9]{1,3}$"
 
-    # Regex for valid IPv6 address
-    local ipv6_regex="^([0-9a-fA-F]{1,4}:){7}([0-9a-fA-F]{1,4})$|^::([0-9a-fA-F]{1,4}:){0,6}([0-9a-fA-F]{1,4})$|^([0-9a-fA-F]{1,4}:){1,6}:([0-9a-fA-F]{1,4})$"
-
-    # Regex for valid domain name (simple check)
-    local domain_regex="^([a-zA-Z0-9](-*[a-zA-Z0-9])*\.)+[a-zA-Z]{2,}$"
+    # Regex for valid IPv6 address (including shorter notations)
+    local ipv6_regex="^(([0-9a-fA-F]{1,4}:){1,7}([0-9a-fA-F]{1,4})?|::([0-9a-fA-F]{1,4}:){0,7}([0-9a-fA-F]{1,4})?)$"
 
     # Check if the target is a valid IPv4 address
-    if [[ $target =~ $ipv4_regex ]]; then
+    if [[ $TARGET =~ $ipv4_regex ]]; then
         TARGET_TYPE="IPv4"
     # Check if the target is a valid IPv6 address
-    elif [[ $target =~ $ipv6_regex ]]; then
+    elif [[ $TARGET =~ $ipv6_regex ]]; then
         TARGET_TYPE="IPv6"
     # Check if the target is a valid domain name
-    elif [[ $target =~ $domain_regex ]]; then
+    elif [[ $TARGET =~ $domain_regex ]]; then
         TARGET_TYPE="DOMAIN"
     else
-        print_error "Invalid target: $target. Please provide a valid domain name, IPv4, or IPv6 address."
+        print_banner
+        print_error "Invalid target: $TARGET. Please provide a valid domain name, IPv4, or IPv6 address."
         exit 1
     fi
 }
+
 
 # Validate the target input
 validate_target "$TARGET"
@@ -257,23 +256,23 @@ check_required_commands() {
 }
 
 check_ipv6_support() {
-    local target="$1"
-
-    # Only check IPv6 support for domain names or IPv6 addresses
-    if [ "$TARGET_TYPE" = "IPv6" ] || [ "$TARGET_TYPE" = "DOMAIN" ]; then
-        if ping6 -c 1 -W 1 "$target" &> /dev/null; then
+    # Only check IPv6 support if the target is specifically identified as an IPv6 address
+    if [ "$TARGET_TYPE" = "IPv6" ]; then
+        if ping6 -c 1 -W 1 "$TARGET" &> /dev/null; then
             IPV6_SUPPORTED=true
-            log_message "INFO" "IPv6 is supported and reachable for $target."
+            print_banner
+            log_message "INFO" "IPv6 is supported and reachable for $TARGET."
         else
             IPV6_SUPPORTED=false
-            log_message "INFO" "IPv6 is not supported or not reachable for $target."
+            print_banner
+            log_message "ERROR" "IPv6 is not supported or not reachable for $TARGET. Exiting."
+            exit 1
         fi
     else
         IPV6_SUPPORTED=false
-        log_message "INFO" "IPv6 check skipped as the target is an IPv4 address."
+        log_message "INFO" "IPv6 check skipped as the target is not an IPv6 address."
     fi
 }
-
 
 # Check if the local machine supports IPv6
 check_ipv6_support
