@@ -85,7 +85,7 @@ fi
 
 # Load the configuration file early in the script
 load_config() {
-    local config_file="/home/$SUDO_USER/.lampscan.conf"
+    local config_file="/home/$SUDO_USER/.stackscan.conf"
     if [ -f "$config_file" ]; then
         source "$config_file"
     else
@@ -95,7 +95,7 @@ load_config() {
 }
 
 create_default_config() {
-    cat <<EOL > /home/$SUDO_USER/.lampscan.conf
+    cat <<EOL > /home/$SUDO_USER/.stackscan.conf
 # Default Nmap options
 NMAP_OPTIONS="-Pn -sC -A -sV -sS"
 
@@ -146,11 +146,11 @@ GENERATE_HTML_REPORT="true"
 LOG_LEVEL="INFO"  # Change this to "VERBOSE" for more detailed logs
 EOL
 
-    log_message "INFO" "Default configuration file created at /home/$SUDO_USER/.lampscan.conf"
+    log_message "INFO" "Default configuration file created at /home/$SUDO_USER/.stackscan.conf"
     sync
 
-    if [ -f "/home/$SUDO_USER/.lampscan.conf" ]; then
-        source /home/$SUDO_USER/.lampscan.conf
+    if [ -f "/home/$SUDO_USER/.stackscan.conf" ]; then
+        source /home/$SUDO_USER/.stackscan.conf
     else
         log_message "ERROR" "Failed to create and source the configuration file."
         exit 1
@@ -264,7 +264,7 @@ print_banner() {
                                 ░                        ░
 
     \e[1;31m                               StackScan (c) 2024 Zayn Otley
-    \e[1;32m                         https://github.com/intuitionamiga/lampscan
+    \e[1;32m                         https://github.com/intuitionamiga/stackscan
     \e[1;34m                            MIT License - Use at your own risk!
 
     "
