@@ -12,7 +12,7 @@
                                    StackScan (c) 2024 Zayn Otley
                              https://github.com/intuitionamiga/stackscan
                                 MIT License - Use at your own risk!
-```
+
 
 # StackScan
 
@@ -58,7 +58,7 @@ You can install these tools using your package manager (e.g., `apt`, `yum`, `bre
 
 2. Ensure the script has executable permissions:
 
-   ```sh
+   ```
    chmod +x stackscan.sh
    ```
 
@@ -66,7 +66,7 @@ You can install these tools using your package manager (e.g., `apt`, `yum`, `bre
 
 To run a scan, execute the script with a target IP or domain. The script must be run with root privileges.
 
-```sh
+```
 sudo ./stackscan.sh [options] <target>
 ```
 
