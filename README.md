@@ -85,10 +85,14 @@ sudo ./stackscan.sh -v 127.0.0.1
 Upon first run, a default configuration file is generated at `~/.stackscan.conf`. This file allows you to customize the scan options for Nmap, Wapiti, and Nikto, as well as other parameters.
 
 **Key Configuration Options:**
-- **NMAP_OPTIONS**: Customize Nmap scan options.
-- **WEB_NMAP_SCRIPTS**: Define scripts to be used for web scanning.
+- **NMAP_OPTIONS**: Customize global Nmap scan options.
+- **x_NMAP_SCRIPTS**: Define scripts to be used for each scan group. (**WEB**, **AUTH**, **DATABASE**, **COMMON**, **VULN** and **CUSTOM** are predefined groups)
+- **x_NMAP_SCRIPT_ARGS**: Define Nmap arguments for each scan group.
+- **x_PORTS**: Define port ranges for each scan group.
 - **NIKTO_OPTIONS**: Set options for Nikto web server scanning.
 - **WAPITI_OPTIONS**: Configure Wapiti options for web vulnerability scanning.
+- **GENERATE_HTML_REPORT**: Enable or disable HTML report generation.
+- **LOG_LEVEL**: Set the logging level (INFO, DEBUG, VERBOSE).
 
 For detailed configuration instructions, including all available options and their usage, please refer to the User Manual.
 
