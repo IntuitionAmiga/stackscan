@@ -160,10 +160,49 @@ EOL
 # Now load the configuration
 load_config
 
+TARGET="$1"
+
+# Initialize log file based on the target and current date/time
+DATE_TIME=$(date +"%Y%m%d_%H%M%S")
+LOG_FILE="${TARGET}_${DATE_TIME}_scan.log"
+HTML_REPORT_FILE="${TARGET}_${DATE_TIME}_scan_report.html"
+NIKTO_OUTPUT_FILE="${TARGET}_${DATE_TIME}_nikto_output.txt"
+
+# Function to print the banner to console and log file
+print_banner() {
+    local banner_text="
+    \e[1;31m  ██████ \e[1;32m▄▄▄█████▓ \e[1;33m▄▄▄       \e[1;34m▄████▄  \e[1;35m ██ ▄█▀  \e[1;36m ██████  \e[1;31m▄████▄  \e[1;32m ▄▄▄       \e[1;33m ███▄    █
+    \e[1;31m▒██    ▒ \e[1;32m▓  ██▒ ▓▒\e[1;33m▒████▄    \e[1;34m▒██▀ ▀█  \e[1;35m ██▄█▒  \e[1;36m▒██    ▒ \e[1;31m▒██▀ ▀█  \e[1;32m▒████▄     \e[1;33m ██ ▀█   █
+    \e[1;31m░ ▓██▄   \e[1;32m▒ ▓██░ ▒░\e[1;33m▒██  ▀█▄  \e[1;34m▒▓█    ▄ \e[1;35m▓███▄░  \e[1;36m░ ▓██▄   \e[1;31m▒▓█    ▄ \e[1;32m▒██  ▀█▄  \e[1;33m▓██  ▀█ ██▒
+    \e[1;31m  ▒   ██▒\e[1;32m░ ▓██▓ ░ \e[1;33m░██▄▄▄▄██ \e[1;34m▒▓▓▄ ▄██▒\e[1;35m▓██ █▄  \e[1;36m  ▒   ██▒\e[1;31m▒▓▓▄ ▄██▒\e[1;32m░██▄▄▄▄██ \e[1;33m▓██▒  ▐▌██▒
+    \e[1;31m▒██████▒▒\e[1;32m  ▒██▒ ░  \e[1;33m▓█   ▓██▒\e[1;34m▒ ▓███▀ ░\e[1;35m▒██▒ █▄ \e[1;36m▒██████▒▒\e[1;31m▒ ▓███▀ ░\e[1;32m ▓█   ▓██▒\e[1;33m▒██░   ▓██░
+    \e[1;31m▒ ▒▓▒ ▒ ░\e[1;32m  ▒ ░░    \e[1;33m▒▒   ▓▒█░\e[1;34m░ ░▒ ▒  ░\e[1;35m▒ ▒▒ ▓▒\e[1;36m▒ ▒▓▒ ▒ ░\e[1;31m░ ░▒ ▒  ░\e[1;32m ▒▒   ▓▒█░\e[1;33m░ ▒░   ▒ ▒
+    \e[1;31m░ ░▒  ░ ░\e[1;32m    ░      \e[1;33m▒   ▒▒ ░\e[1;34m  ░  ▒   \e[1;35m░ ░▒ ▒░\e[1;36m░ ░▒  ░ ░ \e[1;31m  ░  ▒   \e[1;32m  ▒   ▒▒ ░\e[1;33m░ ░░   ░ ▒░
+    \e[1;31m░  ░  ░  \e[1;32m  ░        \e[1;33m░   ▒   \e[1;34m       ░ \e[1;35m░ ░░ ░ \e[1;36m░  ░  ░   \e[1;31m       ░ \e[1;32m    ░   ▒   \e[1;33m   ░   ░ ░
+    \e[1;31m      ░  \e[1;32m             \e[1;33m ░  ░\e[1;34m░ ░      \e[1;35m░  ░   \e[1;36m       ░   \e[1;31m░ ░      \e[1;32m    ░  ░\e[1;33m        ░
+                                ░                        ░
+
+    \e[1;31m                               StackScan (c) 2024 Zayn Otley
+    \e[1;32m                         https://github.com/intuitionamiga/stackscan
+    \e[1;34m                            MIT License - Use at your own risk!
+
+    "
+
+    # Print with ANSI coloring to the console
+    echo -e "${BOLD}${CYAN}$banner_text${RESET}"
+
+# If target not blank then log the banner to the log file
+if [ -z "$1" ]; then
+    # Strip all ANSI escape codes from the banner and print to the log file
+    echo -e "$banner_text" | sed "s,\x1B\[[0-9;]*[a-zA-Z],,g" >> "$LOG_FILE"
+fi
+}
+
 # Check if the user provided an argument
 if [ -z "$1" ]; then
-    echo "Usage: $0 [-v] <domain_or_ip>"
-    exit 1
+  print_banner
+  echo "Usage: $0 [-v] <domain_or_ip>"
+  exit 1
 fi
 
 # Check for verbose flag
@@ -172,7 +211,6 @@ if [ "$1" == "-v" ]; then
     shift  # Remove the -v from the argument list
 fi
 
-TARGET="$1"
 
 # Function to validate the target domain, IPv4, or IPv6 address
 # Function to validate the target domain, IPv4, or IPv6 address
@@ -243,38 +281,7 @@ check_ipv6_support
 # Check required commands
 check_required_commands
 
-# Initialize log file based on the target and current date/time
-DATE_TIME=$(date +"%Y%m%d_%H%M%S")
-LOG_FILE="${TARGET}_${DATE_TIME}_scan.log"
-HTML_REPORT_FILE="${TARGET}_${DATE_TIME}_scan_report.html"
-NIKTO_OUTPUT_FILE="${TARGET}_${DATE_TIME}_nikto_output.txt"
 
-# Function to print the banner to console and log file
-print_banner() {
-    local banner_text="
-    \e[1;31m  ██████ \e[1;32m▄▄▄█████▓ \e[1;33m▄▄▄       \e[1;34m▄████▄  \e[1;35m ██ ▄█▀  \e[1;36m ██████  \e[1;31m▄████▄  \e[1;32m ▄▄▄       \e[1;33m ███▄    █
-    \e[1;31m▒██    ▒ \e[1;32m▓  ██▒ ▓▒\e[1;33m▒████▄    \e[1;34m▒██▀ ▀█  \e[1;35m ██▄█▒  \e[1;36m▒██    ▒ \e[1;31m▒██▀ ▀█  \e[1;32m▒████▄     \e[1;33m ██ ▀█   █
-    \e[1;31m░ ▓██▄   \e[1;32m▒ ▓██░ ▒░\e[1;33m▒██  ▀█▄  \e[1;34m▒▓█    ▄ \e[1;35m▓███▄░  \e[1;36m░ ▓██▄   \e[1;31m▒▓█    ▄ \e[1;32m▒██  ▀█▄  \e[1;33m▓██  ▀█ ██▒
-    \e[1;31m  ▒   ██▒\e[1;32m░ ▓██▓ ░ \e[1;33m░██▄▄▄▄██ \e[1;34m▒▓▓▄ ▄██▒\e[1;35m▓██ █▄  \e[1;36m  ▒   ██▒\e[1;31m▒▓▓▄ ▄██▒\e[1;32m░██▄▄▄▄██ \e[1;33m▓██▒  ▐▌██▒
-    \e[1;31m▒██████▒▒\e[1;32m  ▒██▒ ░  \e[1;33m▓█   ▓██▒\e[1;34m▒ ▓███▀ ░\e[1;35m▒██▒ █▄ \e[1;36m▒██████▒▒\e[1;31m▒ ▓███▀ ░\e[1;32m ▓█   ▓██▒\e[1;33m▒██░   ▓██░
-    \e[1;31m▒ ▒▓▒ ▒ ░\e[1;32m  ▒ ░░    \e[1;33m▒▒   ▓▒█░\e[1;34m░ ░▒ ▒  ░\e[1;35m▒ ▒▒ ▓▒\e[1;36m▒ ▒▓▒ ▒ ░\e[1;31m░ ░▒ ▒  ░\e[1;32m ▒▒   ▓▒█░\e[1;33m░ ▒░   ▒ ▒
-    \e[1;31m░ ░▒  ░ ░\e[1;32m    ░      \e[1;33m▒   ▒▒ ░\e[1;34m  ░  ▒   \e[1;35m░ ░▒ ▒░\e[1;36m░ ░▒  ░ ░ \e[1;31m  ░  ▒   \e[1;32m  ▒   ▒▒ ░\e[1;33m░ ░░   ░ ▒░
-    \e[1;31m░  ░  ░  \e[1;32m  ░        \e[1;33m░   ▒   \e[1;34m       ░ \e[1;35m░ ░░ ░ \e[1;36m░  ░  ░   \e[1;31m       ░ \e[1;32m    ░   ▒   \e[1;33m   ░   ░ ░
-    \e[1;31m      ░  \e[1;32m             \e[1;33m ░  ░\e[1;34m░ ░      \e[1;35m░  ░   \e[1;36m       ░   \e[1;31m░ ░      \e[1;32m    ░  ░\e[1;33m        ░
-                                ░                        ░
-
-    \e[1;31m                               StackScan (c) 2024 Zayn Otley
-    \e[1;32m                         https://github.com/intuitionamiga/stackscan
-    \e[1;34m                            MIT License - Use at your own risk!
-
-    "
-
-    # Print with ANSI coloring to the console
-    echo -e "${BOLD}${CYAN}$banner_text${RESET}"
-
-    # Strip all ANSI escape codes from the banner and print to the log file
-    echo -e "$banner_text" | sed "s,\x1B\[[0-9;]*[a-zA-Z],,g" >> "$LOG_FILE"
-}
 
 # Print the banner
 print_banner
