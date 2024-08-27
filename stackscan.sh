@@ -95,59 +95,135 @@ load_config() {
 }
 
 create_default_config() {
+    if [ -z "$SUDO_USER" ]; then
+        log_message "ERROR" "SUDO_USER is not set. Please run the script with sudo."
+        exit 1
+    fi
+
     cat <<EOL > /home/$SUDO_USER/.stackscan.conf
 # Default Nmap options
-NMAP_OPTIONS="-Pn -sC -A -sV -sS"
+NMAP_OPTIONS="-Pn"  # More general, no aggressive scanning options
 
 # Group-specific Nmap scripts and their specific arguments
 
 # Web Group
-WEB_NMAP_SCRIPTS=("http-enum" "http-vuln*" "http-wordpress*" "http-phpmyadmin-dir-traversal" "http-config-backup" "http-vhosts")
-WEB_NMAP_SCRIPT_ARGS=("http-wordpress-enum.threads=10" "http-wordpress-brute.threads=10" "" "" "" "")
+WEB_NMAP_OPTIONS="-sS -sV"  # Stealth and version detection
+WEB_NMAP_SCRIPTS=(
+  "http-enum"
+  "http-vuln*"
+  "http-wordpress*"
+  "http-phpmyadmin-dir-traversal"
+  "http-config-backup"
+  "http-vhosts"
+  "http-sql-injection"
+  "vulners"
+  "service-info"
+)
+WEB_NMAP_SCRIPT_ARGS=(
+  "http-wordpress-enum.threads=10"
+  "http-wordpress-brute.threads=10"
+  "" "" "" "" "" "" ""
+)
+WEB_PORTS="80,443,8080,8443"
 
 # Auth Group
-AUTH_NMAP_SCRIPTS=("ssh*" "ftp*" "auth*" "ssh-auth-methods")
-AUTH_NMAP_SCRIPT_ARGS=("" "" "" "")
+AUTH_NMAP_OPTIONS="-sS -sV"  # Stealth and version detection
+AUTH_NMAP_SCRIPTS=(
+  "ssh*"
+  "ftp*"
+  "auth*"
+  "ssh-auth-methods"
+  "mysql-brute"
+  "pgsql-brute"
+  "ms-sql-brute"
+  "oracle-brute"
+  "mysql-empty-password"
+  "ms-sql-empty-password"
+)
+AUTH_NMAP_SCRIPT_ARGS=(
+  "" "" "" "" "" "" "" "" "" ""
+)
+AUTH_PORTS="22,21,389,636"
 
 # Database Group
-DATABASE_NMAP_SCRIPTS=("*sql*" "mysql*" "http-sql-injection")
-DATABASE_NMAP_SCRIPT_ARGS=("ftp-anon.maxlist=10" "" "")
+DATABASE_NMAP_OPTIONS="-sT -sV"  # TCP scan and version detection
+DATABASE_NMAP_SCRIPTS=(
+  "mysql-audit"
+  "mysql-info"
+  "mysql-enum"
+  "pgsql-info"
+  "pgsql-databases"
+  "ms-sql-config"
+  "ms-sql-info"
+  "ms-sql-dump-hashes"
+  "ms-sql-query"
+  "ms-sql-tables"
+  "oracle-enum-users"
+  "oracle-query"
+  "oracle-tns-version"
+  "oracle-sid-brute"
+)
+DATABASE_NMAP_SCRIPT_ARGS=(
+  "" "" "" "" "" "" "" "" "" "" "" "" "" ""
+)
+DATABASE_PORTS="3306,5432,1433,1521,1522,1434,3050,3051"
+
+# VULN Group-specific Nmap scripts and their specific arguments
+VULN_NMAP_OPTIONS="-sS -A" # Aggressive scan with OS detection
+VULN_NMAP_SCRIPTS=(
+  "vulners"
+  "http-vuln*"
+  "ssl-heartbleed"
+  "ftp-vsftpd-backdoor"
+  "smb-vuln*"
+  "http-csrf"
+  "dns-zone-transfer"
+)
+VULN_NMAP_SCRIPT_ARGS=(
+  "" "" "" "" "" "" ""
+)
+VULN_PORTS="21,22,25,53,80,110,443,445,1433,3306,3389"
 
 # Common Group
-COMMON_NMAP_SCRIPTS=("*apache*" "dns*" "smb*" "firewall*" "ssl-enum-ciphers" "ssl-cert")
-COMMON_NMAP_SCRIPT_ARGS=("" "" "" "" "" "")
-
-# Vulnerability Group
-VULN_NMAP_SCRIPTS=("vuln*" "vulners")
-VULN_NMAP_SCRIPT_ARGS=("" "")
-
-# Ports to scan by group
-WEB_PORTS="80,443,8080,8443"
-AUTH_PORTS="389,636"
-DATABASE_PORTS="3306,5432,1433,1521"
+COMMON_NMAP_OPTIONS="-sS -sV"  # Stealth and version detection
+COMMON_NMAP_SCRIPTS=(
+  "*apache*"
+  "dns*"
+  "smb*"
+  "firewall*"
+  "ssl-enum-ciphers"
+  "ssl-cert"
+  "service-info"
+)
+COMMON_NMAP_SCRIPT_ARGS=(
+  "" "" "" "" "" "" ""
+)
 COMMON_PORTS="22,21,53,445"
-VULN_PORTS="25,110,143,993,995,1194,500,4500"
-CUSTOM_PORTS=""
 
 # Custom Group (User-defined)
+CUSTOM_NMAP_OPTIONS=""
 CUSTOM_NMAP_SCRIPTS=("")
 CUSTOM_NMAP_SCRIPT_ARGS=("")
+CUSTOM_PORTS=""
 
 # Nikto scan options
 NIKTO_OPTIONS="-ssl"
 
 # Wapiti scan options
-WAPITI_OPTIONS="--scope domain -d 5 --max-links-per-page 100 --flush-attacks --max-scan-time 3600 -m all"
+WAPITI_OPTIONS="--scope domain -d 5 --max-links-per-page 100 --flush-attacks --max-scan-time 3600 -m all --verify-ssl"
 
 # Report generation
 GENERATE_HTML_REPORT="true"
 
 # Log level
 LOG_LEVEL="INFO"  # Change this to "VERBOSE" for more detailed logs
+
 EOL
 
     log_message "INFO" "Default configuration file created at /home/$SUDO_USER/.stackscan.conf"
     sync
+    chown $SUDO_USER:$SUDO_USER /home/$SUDO_USER/.stackscan.conf
+    chmod 600 /home/$SUDO_USER/.stackscan.conf
 
     if [ -f "/home/$SUDO_USER/.stackscan.conf" ]; then
         source /home/$SUDO_USER/.stackscan.conf
@@ -155,7 +231,14 @@ EOL
         log_message "ERROR" "Failed to create and source the configuration file."
         exit 1
     fi
+
+    # Validate the config file was sourced properly
+    if [ -z "$NMAP_OPTIONS" ] || [ -z "$WEB_NMAP_OPTIONS" ] || [ -z "$DATABASE_NMAP_OPTIONS" ]; then
+        log_message "ERROR" "One or more required configuration options are missing after sourcing the config file."
+        exit 1
+    fi
 }
+
 
 # Now load the configuration
 load_config
@@ -328,16 +411,20 @@ spinner() {
     printf "    \r"  # Clear spinner after process is done
 }
 
-
 # Function to execute Nmap with scripts and their arguments
 run_nmap_with_scripts() {
     local scripts=("$1")
     local script_args=("$2")
     local ports="$3"
     local target="$4"
+    local group_name="$5"
+
+    # Determine the Nmap options based on the group name
+    local nmap_options_var="${group_name^^}_NMAP_OPTIONS"  # Convert group name to uppercase to match variable names
+    local nmap_options="${!nmap_options_var}"  # Indirect reference to get the variable value
 
     # Initialize the base Nmap command
-    nmap_command="nmap -Pn -sC -A"
+    nmap_command="nmap $nmap_options"
 
     # Check if there are any scripts to run
     if [ ${#scripts[@]} -eq 0 ]; then
@@ -351,15 +438,15 @@ run_nmap_with_scripts() {
         args="${script_args[$i]}"
 
         if [ -n "$args" ]; then
-            nmap_command+=" --script $script --script-args $args"
+            nmap_command+=" --script=\"$script\" --script-args=\"$args\""
         else
-            nmap_command+=" --script $script"
+            nmap_command+=" --script=\"$script\""
         fi
     done
 
     # Execute the Nmap command if scripts are provided
     if [ -n "$nmap_command" ]; then
-        $nmap_command -p $ports $target > /dev/null 2>&1
+        $nmap_command -p "$ports" "$target" > /dev/null 2>&1 &
     fi
 }
 
@@ -367,40 +454,43 @@ run_nmap_with_scripts() {
 # Function to run a group scan
 run_scan_group() {
     local group_name="$1"
-    local group_scripts=($2)  # Convert to array
-    local group_script_args=($3)  # Convert to array
+    local group_scripts=("$2")  # Convert to array
+    local group_script_args=("$3")  # Convert to array
     local group_ports="$4"
     local ip_version="$5"
     local target_ip="$6"
 
-    local output_file="${TARGET}_${group_name}_${ip_version}_scan_output.txt"
-    local nmap_options="$NMAP_OPTIONS"
+    # Determine the Nmap options based on the group name
+    local nmap_options_var="${group_name^^}_NMAP_OPTIONS"  # Convert group name to uppercase to match variable names
+    local nmap_options="${!nmap_options_var}"  # Indirect reference to get the variable value
 
     if [ "$ip_version" == "IPv6" ]; then
         nmap_options="$nmap_options -6"
     fi
 
+    local output_file="${target_ip}_${group_name}_${ip_version}_scan_output.txt"
+
     print_status "Starting $group_name scan on $target_ip ($ip_version)..."
 
-    # Loop through each script and its arguments
-    for i in "${!group_scripts[@]}"; do
-        script="${group_scripts[$i]}"
-        script_args="${group_script_args[$i]}"
+    # Construct the Nmap command
+    local nmap_command="nmap $nmap_options -p $group_ports $target_ip --min-rate=100 --randomize-hosts -oN $output_file -vv"
 
-        # Construct the Nmap command
-        nmap_command="nmap $nmap_options --script \"$script\""
+    # Loop through each script and apply its specific arguments
+    for i in "${!group_scripts[@]}"; do
+        local script="${group_scripts[$i]}"
+        local script_args="${group_script_args[$i]}"
 
         if [ -n "$script_args" ]; then
-            nmap_command+=" --script-args=\"$script_args\""
+            nmap_command+=" --script=\"$script\" --script-args=\"$script_args\""
+        else
+            nmap_command+=" --script=\"$script\""
         fi
-
-        nmap_command+=" -p \"$group_ports\" \"$target_ip\" --min-rate=100 --randomize-hosts -oN \"$output_file\" -vv"
-
-        # Execute the Nmap command
-        eval $nmap_command > /dev/null 2>&1 &
-        spinner "Nmap $group_name scan"
-        print_verbose "Nmap command executed for $group_name ($ip_version): $nmap_command" >/dev/null 2>&1
     done
+
+    # Execute the Nmap command
+    eval $nmap_command > /dev/null 2>&1 &
+    spinner "Nmap $group_name scan"
+    print_verbose "Nmap command executed for $group_name ($ip_version): $nmap_command" >/dev/null 2>&1
 }
 
 # Execute scans in parallel for IPv4 and IPv6
@@ -435,6 +525,7 @@ fi
 
 # Wait for all nmap scans to finish so that we can extract the web server port numbers
 wait
+
 
 # Extract and clean port numbers
 extract_web_servers() {
