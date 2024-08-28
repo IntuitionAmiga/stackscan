@@ -862,7 +862,6 @@ generate_html_report() {
     done
 
     # Wapiti Scan Results
-    # Read the Wapiti scan count from the temporary file
     if [ -f /tmp/wapiti_scan_count.txt ]; then
         wapiti_scan_count=$(cat /tmp/wapiti_scan_count.txt)
     else
@@ -872,11 +871,8 @@ generate_html_report() {
     wapiti_found=false
     for wapiti_file in ${TARGET}_*_wapiti_output.txt; do
         if [ -f "$wapiti_file" ] && [ -s "$wapiti_file" ]; then
-            if grep -q "No web server found" "$wapiti_file"; then
-                echo "$(cat "$wapiti_file")" >> "$HTML_REPORT_FILE"
-            else
-                cat "$wapiti_file" >> "$HTML_REPORT_FILE"
-            fi
+            echo "Results from: $wapiti_file" >> "$HTML_REPORT_FILE"
+            cat "$wapiti_file" >> "$HTML_REPORT_FILE"
             echo -e "\n" >> "$HTML_REPORT_FILE"
             wapiti_found=true
         fi
@@ -886,32 +882,26 @@ generate_html_report() {
     fi
     echo "</pre></div>" >> "$HTML_REPORT_FILE"
 
-
-   # Nikto Scan Results
-   # Read the Nikto scan count from the temporary file
-       if [ -f /tmp/nikto_scan_count.txt ]; then
-           nikto_scan_count=$(cat /tmp/nikto_scan_count.txt)
-       else
-           nikto_scan_count=0
-       fi
-       echo "<div class=\"scan-section\"><h2>Nikto Scan  - $nikto_scan_count Report(s)</h2><pre>" >> "$HTML_REPORT_FILE"
-       nikto_found=false
-       for nikto_file in ${TARGET}_*_nikto_output.txt; do
-           if [ -f "$nikto_file" ] && [ -s "$nikto_file" ]; then
-               # Count the number of lines in the file
-               line_count=$(wc -l < "$nikto_file")
-               # Include only if there is more than one line
-               if [ "$line_count" -gt 1 ]; then
-                   cat "$nikto_file" >> "$HTML_REPORT_FILE"
-                   echo -e "\n" >> "$HTML_REPORT_FILE"  # Add a newline between results for readability
-                   nikto_found=true
-               fi
-           fi
-       done
-       if [ "$nikto_found" = false ]; then
-           echo "No Nikto results found." >> "$HTML_REPORT_FILE"
-       fi
-       echo "</pre></div>" >> "$HTML_REPORT_FILE"
+    # Nikto Scan Results
+    if [ -f /tmp/nikto_scan_count.txt ]; then
+        nikto_scan_count=$(cat /tmp/nikto_scan_count.txt)
+    else
+        nikto_scan_count=0
+    fi
+    echo "<div class=\"scan-section\"><h2>Nikto Scan - $nikto_scan_count Report(s)</h2><pre>" >> "$HTML_REPORT_FILE"
+    nikto_found=false
+    for nikto_file in ${TARGET}_*_nikto_output.txt; do
+        if [ -f "$nikto_file" ] && [ -s "$nikto_file" ]; then
+            echo "Results from: $nikto_file" >> "$HTML_REPORT_FILE"
+            cat "$nikto_file" >> "$HTML_REPORT_FILE"
+            echo -e "\n" >> "$HTML_REPORT_FILE"  # Add a newline between results for readability
+            nikto_found=true
+        fi
+    done
+    if [ "$nikto_found" = false ]; then
+        echo "No Nikto results found." >> "$HTML_REPORT_FILE"
+    fi
+    echo "</pre></div>" >> "$HTML_REPORT_FILE"
 
     # Detailed Vulnerability Information
     echo "<div class=\"scan-section\"><h2>Detailed Vulnerability Report(s)</h2>" >> "$HTML_REPORT_FILE"
