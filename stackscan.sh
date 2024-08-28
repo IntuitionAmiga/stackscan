@@ -124,7 +124,7 @@ WEB_NMAP_SCRIPT_ARGS=(
   "http-wordpress-brute.threads=10"
   "" "" "" "" "" "" ""
 )
-WEB_PORTS="80,443,8080,8443"
+WEB_PORTS="80,443,8080,8443,8000,8888,8181,9090,8081,9000,10000,3000,5000,7000,7001,4433,10443,16080,61000,61001"
 
 # Auth Group
 AUTH_NMAP_OPTIONS="-sS -sV"  # Stealth and version detection
