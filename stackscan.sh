@@ -692,9 +692,20 @@ if [ -n "$open_ports" ]; then
     run_nikto_scan "$TARGET" $open_ports &
     nikto_pid=$!
 
-    # Wait for Wapiti and Nikto scans to complete
+    # Wait for Wapiti scan to complete
     wait $wapiti_pid
+    wapiti_status=$?
+    if [ $wapiti_status -ne 0 ]; then
+        log_message "WARNING: Wapiti scan process exited with status $wapiti_status."
+    fi
+
+    # Wait for Nikto scan to complete
     wait $nikto_pid
+    nikto_status=$?
+    if [ $nikto_status -ne 0 ]; then
+        log_message "ERROR: Nikto scan process exited with status $nikto_status."
+        # Continue script even if Nikto fails
+    fi
 else
     log_message "No open web server ports found. Skipping Wapiti and Nikto scans."
 fi
