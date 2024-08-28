@@ -207,10 +207,10 @@ CUSTOM_NMAP_SCRIPT_ARGS=("")
 CUSTOM_PORTS=""
 
 # Nikto scan options
-NIKTO_OPTIONS=""
+NIKTO_OPTIONS="-timeout 10"
 
 # Wapiti scan options
-WAPITI_OPTIONS="--flush-session --scope domain -d 5 --max-links-per-page 100 --flush-attacks --max-scan-time 3600 -m all --verify-ssl 1"
+WAPITI_OPTIONS="--flush-session --scope domain -d 5 --max-links-per-page 100 --flush-attacks --max-scan-time 1800 --timeout 10 -m all --verify-ssl 1"
 
 # Report generation
 GENERATE_HTML_REPORT="true"
@@ -365,13 +365,13 @@ check_required_commands
 
 # Print the banner
 print_banner
-log_message "INFO" "Scan Date: $(date)"
+log_message "INFO" "$(date '+[%Y-%m-%d %H:%M:%S]') Scan Date: $(date)"
 
 # If -v parameter is provided, print message to console else print current log level
 if [ "$LOG_LEVEL" = "VERBOSE" ]; then
-    log_message "VERBOSE" "Verbose mode enabled. Detailed logs will be printed."
+    log_message "VERBOSE" "$(date '+[%Y-%m-%d %H:%M:%S]') Verbose mode enabled. Detailed logs will be printed."
 else
-    log_message "WARNING" "Verbose mode disabled. Only important logs will be printed."
+    log_message "WARNING" "$(date '+[%Y-%m-%d %H:%M:%S]') Verbose mode disabled. Only important logs will be printed."
 fi
 
 # Spinner function
@@ -610,6 +610,9 @@ run_wapiti_scan() {
     local wapiti_pids=()  # Array to hold the PIDs of background Wapiti processes
     declare -A wapiti_scanned_ports  # Declare associative array locally
 
+    local wapiti_scan_count=0  # Initialize a counter
+
+    trap '' PIPE  # Ignore SIGPIPE to prevent script termination
     for port in "${ports[@]}"; do
         if [ "${wapiti_scanned_ports[$port]}" ]; then
             continue
@@ -622,25 +625,39 @@ run_wapiti_scan() {
 
         print_status "$(date '+[%Y-%m-%d %H:%M:%S]') Starting Wapiti scan on $url..."
         local output_file="${target_ip}_${port}_wapiti_output.txt"
+        # Log the exact Wapiti command being executed
+        print_verbose "Executing Wapiti command: wapiti -u \"$url\" $WAPITI_OPTIONS -f txt -o \"$output_file\"" >>/dev/null 2>&1
+
         wapiti -u "$url" $WAPITI_OPTIONS -f txt -o "$output_file" > "${output_file}_log.txt" 2>&1 &
+        # Add dividing line after each scan's output
+        echo " " >> "${target_ip}_${port}_nikto_output_log.txt"
+        echo "------------------------------------------------------------------" >> "${target_ip}_${port}_nikto_output_log.txt"
+        echo " " >> "${target_ip}_${port}_nikto_output_log.txt"
+
         wapiti_pid=$!  # Capture the PID of the Wapiti process
         wapiti_pids+=($wapiti_pid)
 
         wapiti_scanned_ports[$port]=1  # Mark this port as scanned
+
+        # Increment the counter
+        ((wapiti_scan_count++))
 
         # Start the spinner for this Wapiti process
         (spinner "Wapiti on Port $port") &
         spinner_pid=$!
 
         # Wait for Wapiti to complete and kill the spinner
-        wait $wapiti_pid
+        wait $wapiti_pid || true
         kill $spinner_pid 2>/dev/null
     done
 
     # Wait for all Wapiti processes to complete
     for pid in "${wapiti_pids[@]}"; do
-        wait $pid
+        wait $pid || true
     done
+
+    # Store the number of Wapiti scans
+    echo "$wapiti_scan_count" > /tmp/wapiti_scan_count.txt
 }
 
 run_nikto_scan() {
@@ -650,26 +667,39 @@ run_nikto_scan() {
     local nikto_pids=()  # Array to hold the PIDs of background Nikto processes
     declare -A nikto_scanned_ports  # Declare associative array locally
 
+    # Initialize or reset the scan count
+    local nikto_scan_count=0
+
+    trap '' PIPE  # Ignore SIGPIPE to prevent script termination
     for port in "${ports[@]}"; do
         if [ "${nikto_scanned_ports[$port]}" ]; then
             continue
         fi
 
         print_status "$(date '+[%Y-%m-%d %H:%M:%S]') Starting Nikto scan on $target_ip:$port..."
+        # Log the exact Nikto command being executed
+        print_verbose "Executing Nikto command: nikto -h \"$target_ip\" -p \"$port\" $NIKTO_OPTIONS -output \"$output_file\"" >>/dev/null 2>&1
 
         # Run Nikto in the background and immediately capture the PID
         nikto -h "$target_ip" -p "$port" $NIKTO_OPTIONS -output "${target_ip}_${port}_nikto_output.txt" > "${target_ip}_${port}_nikto_output_log.txt" 2>&1 &
+        # Add dividing line after each scan's output
+        echo " " >> "${target_ip}_${port}_nikto_output_log.txt"
+        echo "------------------------------------------------------------------" >> "${target_ip}_${port}_nikto_output_log.txt"
+        echo " " >> "${target_ip}_${port}_nikto_output_log.txt"
         local nikto_pid=$!  # Store the PID for this particular Nikto process
         nikto_pids+=($nikto_pid)  # Append the PID to the array
 
         nikto_scanned_ports[$port]=1  # Mark this port as scanned
+
+        # Increment the scan count
+        ((nikto_scan_count++))
 
         # Start the spinner for this Nikto process
         (spinner "Nikto on Port $port") &
         local spinner_pid=$!
 
         # Wait for Nikto to complete and kill the spinner
-        wait $nikto_pid
+        wait $nikto_pid || true
         kill $spinner_pid 2>/dev/null
 
         print_verbose "Nikto command executed for $target_ip:$port: nikto -h $target_ip -p $port $NIKTO_OPTIONS -output ${target_ip}_${port}_nikto_output.txt" >/dev/null 2>&1
@@ -679,6 +709,9 @@ run_nikto_scan() {
     for pid in "${nikto_pids[@]}"; do
         wait $pid
     done
+
+    # Store the number of Nikto scans
+    echo "$nikto_scan_count" > /tmp/nikto_scan_count.txt
 }
 
 # Get the open web server ports
@@ -711,13 +744,14 @@ else
 fi
 
 
+
 # Merge results
 FINAL_OUTPUT_FILE="${TARGET}_${DATE_TIME}_final_scan_output.txt"
 cat *_scan_output.txt > "$FINAL_OUTPUT_FILE"
 
 # Print final status messages
-print_status "Nmap and Nikto scanning complete for $TARGET."
-log_message "INFO" "Log saved to: $LOG_FILE"
+print_status "$(date '+[%Y-%m-%d %H:%M:%S]') Scanning complete for $TARGET."
+log_message "INFO" "$(date '+[%Y-%m-%d %H:%M:%S]') Log saved to: $LOG_FILE"
 
 # Function to generate an HTML report with advanced features
 function lookup_cve_details() {
@@ -778,8 +812,8 @@ lookup_cve_by_service_version() {
 }
 
 generate_html_report() {
-    print_status "Generating HTML report..."
-        echo "<html><head><title>Scan Report for $TARGET</title>" > "$HTML_REPORT_FILE"
+    print_status "$(date '+[%Y-%m-%d %H:%M:%S]') Generating HTML report..."
+        echo "<html><head><title>StackScan Report for $TARGET</title>" > "$HTML_REPORT_FILE"
         echo "<style>
                 body { font-family: Arial, sans-serif; }
                 h1, h2 { color: #2e6c80; }
@@ -818,7 +852,9 @@ generate_html_report() {
         for group_name in web auth database common vuln; do
             local output_file="${TARGET}_${group_name}_${ip_version}_scan_output.txt"
             if [ -f "$output_file" ]; then
-                echo "<div class=\"scan-section\"><h2>Nmap ${group_name^} Group Results ($ip_version)</h2><pre>" >> "$HTML_REPORT_FILE"
+                # Count the number of Nmap commands executed by counting the occurrence of "Executing Nmap Command" in the output file
+                local scan_count=$(grep -c "Executing Nmap Command" "$output_file")
+                echo "<div class=\"scan-section\"><h2>Nmap ${group_name^} Group - $scan_count Scan Report(s) ($ip_version)</h2><pre>" >> "$HTML_REPORT_FILE"
                 cat "$output_file" >> "$HTML_REPORT_FILE"
                 echo "</pre></div>" >> "$HTML_REPORT_FILE"
             fi
@@ -826,7 +862,13 @@ generate_html_report() {
     done
 
     # Wapiti Scan Results
-    echo "<div class=\"scan-section\"><h2>Wapiti Scan Results</h2><pre>" >> "$HTML_REPORT_FILE"
+    # Read the Wapiti scan count from the temporary file
+    if [ -f /tmp/wapiti_scan_count.txt ]; then
+        wapiti_scan_count=$(cat /tmp/wapiti_scan_count.txt)
+    else
+        wapiti_scan_count=0
+    fi
+    echo "<div class=\"scan-section\"><h2>Wapiti Scan - $wapiti_scan_count Report(s)</h2><pre>" >> "$HTML_REPORT_FILE"
     wapiti_found=false
     for wapiti_file in ${TARGET}_*_wapiti_output.txt; do
         if [ -f "$wapiti_file" ] && [ -s "$wapiti_file" ]; then
@@ -846,7 +888,13 @@ generate_html_report() {
 
 
    # Nikto Scan Results
-       echo "<div class=\"scan-section\"><h2>Nikto Scan Results</h2><pre>" >> "$HTML_REPORT_FILE"
+   # Read the Nikto scan count from the temporary file
+       if [ -f /tmp/nikto_scan_count.txt ]; then
+           nikto_scan_count=$(cat /tmp/nikto_scan_count.txt)
+       else
+           nikto_scan_count=0
+       fi
+       echo "<div class=\"scan-section\"><h2>Nikto Scan  - $nikto_scan_count Report(s)</h2><pre>" >> "$HTML_REPORT_FILE"
        nikto_found=false
        for nikto_file in ${TARGET}_*_nikto_output.txt; do
            if [ -f "$nikto_file" ] && [ -s "$nikto_file" ]; then
@@ -866,7 +914,7 @@ generate_html_report() {
        echo "</pre></div>" >> "$HTML_REPORT_FILE"
 
     # Detailed Vulnerability Information
-    echo "<div class=\"scan-section\"><h2>Detailed Vulnerability Information</h2>" >> "$HTML_REPORT_FILE"
+    echo "<div class=\"scan-section\"><h2>Detailed Vulnerability Report(s)</h2>" >> "$HTML_REPORT_FILE"
 
     # Collect vulnerabilities from the scan results
     local vuln_file="${TARGET}_vuln_scan_output.txt"
@@ -905,7 +953,7 @@ generate_html_report() {
 
     echo "</body></html>" >> "$HTML_REPORT_FILE"
 
-    log_message "INFO" "HTML Report saved to: $HTML_REPORT_FILE"
+    log_message "INFO" "$(date '+[%Y-%m-%d %H:%M:%S]') HTML Report saved to: $HTML_REPORT_FILE"
 }
 
 scan_end_time=$(date +%s)
@@ -923,7 +971,7 @@ if [ -n "$SUDO_USER" ]; then
 fi
 
 # Print total scan duration
-log_message "INFO" "Total scan time: $formatted_scan_duration"
+log_message "INFO" "$(date '+[%Y-%m-%d %H:%M:%S]') Total scan time: $formatted_scan_duration"
 
 # Clean up the temporary files
 rm -f *_output.txt
