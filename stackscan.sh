@@ -94,6 +94,7 @@ load_config() {
     fi
 }
 
+# Create a default configuration file if it doesn't exist
 create_default_config() {
     if [ -z "$SUDO_USER" ]; then
         log_message "ERROR" "SUDO_USER is not set. Please run the script with sudo."
@@ -107,7 +108,7 @@ NMAP_OPTIONS="-Pn"  # More general, no aggressive scanning options
 # Group-specific Nmap scripts and their specific arguments
 
 # Web Group
-WEB_NMAP_OPTIONS="-sS -sV"  # Stealth and version detection
+WEB_NMAP_OPTIONS="-sT"  # TCP scan
 WEB_NMAP_SCRIPTS=(
   "http-enum"
   "http-vuln*"
@@ -116,7 +117,6 @@ WEB_NMAP_SCRIPTS=(
   "http-config-backup"
   "http-vhosts"
   "http-sql-injection"
-  "vulners"
   "service-info"
 )
 WEB_NMAP_SCRIPT_ARGS=(
@@ -207,10 +207,10 @@ CUSTOM_NMAP_SCRIPT_ARGS=("")
 CUSTOM_PORTS=""
 
 # Nikto scan options
-NIKTO_OPTIONS="-ssl"
+NIKTO_OPTIONS=""
 
 # Wapiti scan options
-WAPITI_OPTIONS="--scope domain -d 5 --max-links-per-page 100 --flush-attacks --max-scan-time 3600 -m all --verify-ssl"
+WAPITI_OPTIONS="--flush-session --scope domain -d 5 --max-links-per-page 100 --flush-attacks --max-scan-time 3600 -m all --verify-ssl 1"
 
 # Report generation
 GENERATE_HTML_REPORT="true"
@@ -363,8 +363,6 @@ check_ipv6_support
 # Check required commands
 check_required_commands
 
-
-
 # Print the banner
 print_banner
 log_message "INFO" "Scan Date: $(date)"
@@ -411,6 +409,18 @@ spinner() {
     printf "    \r"  # Clear spinner after process is done
 }
 
+# Function to expand wildcard patterns to actual script names
+expand_wildcard_scripts() {
+    local script_pattern="$1"
+    local expanded_scripts=()
+
+    # Expand wildcard pattern to actual script names
+    expanded_scripts=($(find /usr/share/nmap/scripts/ -name "${script_pattern}.nse" -exec basename {} .nse \;))
+
+    # Return the expanded script names as an array
+    echo "${expanded_scripts[@]}"
+}
+
 # Function to execute Nmap with scripts and their arguments
 run_nmap_with_scripts() {
     local scripts=("$1")
@@ -420,11 +430,11 @@ run_nmap_with_scripts() {
     local group_name="$5"
 
     # Determine the Nmap options based on the group name
-    local nmap_options_var="${group_name^^}_NMAP_OPTIONS"  # Convert group name to uppercase to match variable names
-    local nmap_options="${!nmap_options_var}"  # Indirect reference to get the variable value
+    local nmap_options_var="${group_name^^}_NMAP_OPTIONS"
+    local nmap_options="${!nmap_options_var}"
 
     # Initialize the base Nmap command
-    nmap_command="nmap $nmap_options"
+    local nmap_command="nmap $nmap_options -p $ports $target"
 
     # Check if there are any scripts to run
     if [ ${#scripts[@]} -eq 0 ]; then
@@ -444,25 +454,22 @@ run_nmap_with_scripts() {
         fi
     done
 
-    # Execute the Nmap command if scripts are provided
-    if [ -n "$nmap_command" ]; then
-        $nmap_command -p "$ports" "$target" > /dev/null 2>&1 &
-    fi
+    # Execute the Nmap command
+    $nmap_command > /dev/null 2>&1 &
 }
-
 
 # Function to run a group scan
 run_scan_group() {
     local group_name="$1"
-    local group_scripts=("$2")  # Convert to array
-    local group_script_args=("$3")  # Convert to array
+    local group_scripts=("${!2}")
+    local group_script_args=("${!3}")
     local group_ports="$4"
     local ip_version="$5"
     local target_ip="$6"
 
     # Determine the Nmap options based on the group name
-    local nmap_options_var="${group_name^^}_NMAP_OPTIONS"  # Convert group name to uppercase to match variable names
-    local nmap_options="${!nmap_options_var}"  # Indirect reference to get the variable value
+    local nmap_options_var="${group_name^^}_NMAP_OPTIONS"
+    local nmap_options="${!nmap_options_var}"
 
     if [ "$ip_version" == "IPv6" ]; then
         nmap_options="$nmap_options -6"
@@ -470,187 +477,228 @@ run_scan_group() {
 
     local output_file="${target_ip}_${group_name}_${ip_version}_scan_output.txt"
 
-    print_status "Starting $group_name scan on $target_ip ($ip_version)..."
-
-    # Construct the Nmap command
-    local nmap_command="nmap $nmap_options -p $group_ports $target_ip --min-rate=100 --randomize-hosts -oN $output_file -vv"
+    print_status "$(date '+[%Y-%m-%d %H:%M:%S]') Starting Nmap $group_name scan on $target_ip ($ip_version)..."
 
     # Loop through each script and apply its specific arguments
     for i in "${!group_scripts[@]}"; do
         local script="${group_scripts[$i]}"
         local script_args="${group_script_args[$i]}"
 
-        if [ -n "$script_args" ]; then
-            nmap_command+=" --script=\"$script\" --script-args=\"$script_args\""
-        else
-            nmap_command+=" --script=\"$script\""
-        fi
-    done
+        # Expand wildcard patterns to actual script names
+        expanded_scripts=($(expand_wildcard_scripts "$script"))
 
-    # Execute the Nmap command
-    eval $nmap_command > /dev/null 2>&1 &
-    spinner "Nmap $group_name scan"
-    print_verbose "Nmap command executed for $group_name ($ip_version): $nmap_command" >/dev/null 2>&1
+        # Loop through each expanded script name
+        for expanded_script in "${expanded_scripts[@]}"; do
+            local individual_nmap_command="nmap $nmap_options -p $group_ports $target_ip --min-rate=100 --randomize-hosts >> $output_file -vv"
+
+            if [ -n "$script_args" ]; then
+                individual_nmap_command+=" --script=\"$expanded_script\" --script-args=\"$script_args\""
+            else
+                individual_nmap_command+=" --script=\"$expanded_script\""
+            fi
+
+            # Execute the Nmap command and append the command and its output to the output file
+            echo "Executing Nmap Command: $individual_nmap_command" >> "$output_file"
+            eval $individual_nmap_command >> "$output_file" 2>&1
+
+            # Add a dividing line after each command's output
+            echo " " >> "$output_file"
+            echo "------------------------------------------------------------------" >> "$output_file"
+            echo " " >> "$output_file"
+
+            spinner "Nmap $group_name scan - Script: $expanded_script"
+            print_verbose "Nmap command executed for $group_name ($ip_version), Script: $expanded_script: $individual_nmap_command" >/dev/null 2>&1
+        done
+
+    done
 }
 
-# Execute scans in parallel for IPv4 and IPv6
+# Function to execute scans in parallel for IPv4 and IPv6
 run_scans() {
     local ip_version="$1"
     local target_ip="$2"
 
-    # Run predefined scan groups
-    run_scan_group "web" "$WEB_NMAP_SCRIPTS" "$WEB_NMAP_SCRIPT_ARGS" "$WEB_PORTS" "$ip_version" "$target_ip" &
-    run_scan_group "auth" "$AUTH_NMAP_SCRIPTS" "$AUTH_NMAP_SCRIPT_ARGS" "$AUTH_PORTS" "$ip_version" "$target_ip" &
-    run_scan_group "database" "$DATABASE_NMAP_SCRIPTS" "$DATABASE_NMAP_SCRIPT_ARGS" "$DATABASE_PORTS" "$ip_version" "$target_ip" &
-    run_scan_group "common" "$COMMON_NMAP_SCRIPTS" "$COMMON_NMAP_SCRIPT_ARGS" "$COMMON_PORTS" "$ip_version" "$target_ip" &
-    run_scan_group "vuln" "$VULN_NMAP_SCRIPTS" "$VULN_NMAP_SCRIPT_ARGS" "$VULN_PORTS" "$ip_version" "$target_ip" &
+    # Run predefined scan groups and capture the PID for the web scan group
+    run_scan_group "web" WEB_NMAP_SCRIPTS[@] WEB_NMAP_SCRIPT_ARGS[@] "$WEB_PORTS" "$ip_version" "$target_ip" &
+    web_scan_pid=$!
+
+    # Run other scan groups in the background (no need to capture these PIDs for now)
+    run_scan_group "auth" AUTH_NMAP_SCRIPTS[@] AUTH_NMAP_SCRIPT_ARGS[@] "$AUTH_PORTS" "$ip_version" "$target_ip" &
+    run_scan_group "database" DATABASE_NMAP_SCRIPTS[@] DATABASE_NMAP_SCRIPT_ARGS[@] "$DATABASE_PORTS" "$ip_version" "$target_ip" &
+    run_scan_group "common" COMMON_NMAP_SCRIPTS[@] COMMON_NMAP_SCRIPT_ARGS[@] "$COMMON_PORTS" "$ip_version" "$target_ip" &
+    run_scan_group "vuln" VULN_NMAP_SCRIPTS[@] VULN_NMAP_SCRIPT_ARGS[@] "$VULN_PORTS" "$ip_version" "$target_ip" &
 
     # Run the custom group if defined
     if [ -n "${CUSTOM_NMAP_SCRIPTS[0]}" ]; then
         if ! nmap --script-help="${CUSTOM_NMAP_SCRIPTS[0]}" > /dev/null 2>&1; then
             print_warning "Custom scripts not found or invalid: ${CUSTOM_NMAP_SCRIPTS[0]}"
         else
-            run_scan_group "custom" "$CUSTOM_NMAP_SCRIPTS" "$CUSTOM_NMAP_SCRIPT_ARGS" "$CUSTOM_PORTS" "$ip_version" "$target_ip" &
+            run_scan_group "custom" CUSTOM_NMAP_SCRIPTS[@] CUSTOM_NMAP_SCRIPT_ARGS[@] "$CUSTOM_PORTS" "$ip_version" "$target_ip" &
         fi
     fi
 }
 
-# Run for IPv4
-run_scans "IPv4" "$TARGET"
 
-# Run for IPv6 only if supported and the target is not an IPv4 address
+# Run for IPv4 and capture the web scan PID
+run_scans "IPv4" "$TARGET"
+web_scan_pid_v4=$web_scan_pid
+
+# Run for IPv6 only if supported and the target is not an IPv4 address, capture the web scan PID
 if [ "$IPV6_SUPPORTED" = true ] && [ "$TARGET_TYPE" != "IPv4" ]; then
     run_scans "IPv6" "$TARGET"
+    web_scan_pid_v6=$web_scan_pid
 fi
 
-# Wait for all nmap scans to finish so that we can extract the web server port numbers
-wait
+# Wait for the web-related Nmap scans to finish so that we can extract the web server port numbers
+wait $web_scan_pid_v4
+if [ -n "$web_scan_pid_v6" ]; then
+    wait $web_scan_pid_v6
+fi
 
-
-# Extract and clean port numbers
-extract_web_servers() {
+# Extract any open web server ports and scan them with Wapiti and Nikto
+get_open_web_ports() {
     local ipv4_file="${TARGET}_web_IPv4_scan_output.txt"
     local ipv6_file="${TARGET}_web_IPv6_scan_output.txt"
+    local open_ports=""
 
+    # Check and extract from the IPv4 scan output
     if [ -f "$ipv4_file" ]; then
-        awk '
-        /^[0-9]{1,5}\/tcp/ {
-            if ($0 ~ /http|https|nginx|apache/) {
-                split($1, a, "/")
-                print a[1]
+        local ipv4_ports=$(awk '
+        /^[0-9]+\/tcp\s+open/ {  # Match lines with open TCP ports
+            if ($3 ~ /^http/) {  # Check if the service name starts with "http"
+                split($1, port_info, "/")  # Split the port information
+                print port_info[1]  # Print the port number
             }
-        }' "$ipv4_file"
+        }' "$ipv4_file")
+
+        # Append IPv4 ports to the open_ports variable
+        open_ports+="$ipv4_ports "
     fi
 
+    # Check and extract from the IPv6 scan output if available
     if [ -f "$ipv6_file" ]; then
-        awk '
-        /^[0-9]{1,5}\/tcp/ {
-            if ($0 ~ /http|https|nginx|apache/) {
-                split($1, a, "/")
-                print a[1]
+        local ipv6_ports=$(awk '
+        /^[0-9]+\/tcp\s+open/ {  # Match lines with open TCP ports
+            if ($3 ~ /^http/) {  # Check if the service name starts with "http"
+                split($1, port_info, "/")
+                print port_info[1]
             }
-        }' "$ipv6_file"
+        }' "$ipv6_file")
+
+        # Append IPv6 ports to the open_ports variable
+        open_ports+="$ipv6_ports "
     fi
 
-    if [ ! -f "$ipv4_file" ] && [ ! -f "$ipv6_file" ]; then
-        echo "Error: Neither web scan file found for IPv4 or IPv6."
+    # Remove any leading or trailing whitespace
+    open_ports=$(echo "$open_ports" | xargs)
+
+    # Handle no matching results case
+    if [ -z "$open_ports" ]; then
+        echo "No open web server ports found."
         return 1
+    else
+        echo "$open_ports"
     fi
+
+    return 0
 }
-
-print_extracted_web_servers() {
-    local web_servers
-    web_servers=$(extract_web_servers)
-
-    log_message "INFO" "Potential Web Servers detected on following ports:"
-    log_message "INFO" "--------------------------------"
-
-    # Print each extracted web server line
-    while IFS= read -r line; do
-        echo "$line"
-    done <<< "$web_servers"
-
-    log_message "INFO" "--------------------------------"
-}
-
-# Call the function to print the extracted web servers
-#print_extracted_web_servers
 
 run_wapiti_scan() {
     local target_ip="$1"
     shift  # Shift the arguments to get only ports
     local ports=("$@")  # Capture all ports into an array
     local wapiti_pids=()  # Array to hold the PIDs of background Wapiti processes
+    declare -A wapiti_scanned_ports  # Declare associative array locally
 
     for port in "${ports[@]}"; do
-        local url="http://$target_ip:$port"  # Assume HTTP by default
-        if [[ "$port" == "443" || "$port" == "8443" ]]; then
-            url="https://$target_ip:$port"  # Use HTTPS for common secure ports
+        if [ "${wapiti_scanned_ports[$port]}" ]; then
+            continue
         fi
 
-        print_status "Starting Wapiti scan on $url..."
+        local url="http://$target_ip:$port"
+        if [[ "$port" == "443" || "$port" == "8443" ]]; then
+            url="https://$target_ip:$port"
+        fi
+
+        print_status "$(date '+[%Y-%m-%d %H:%M:%S]') Starting Wapiti scan on $url..."
         local output_file="${target_ip}_${port}_wapiti_output.txt"
-        wapiti -u "$url" $WAPITI_OPTIONS -f txt -o "$output_file" > /dev/null 2>&1 &
-        wapiti_pids+=($!)  # Capture the PID of the Wapiti process
+        wapiti -u "$url" $WAPITI_OPTIONS -f txt -o "$output_file" > "${output_file}_log.txt" 2>&1 &
+        wapiti_pid=$!  # Capture the PID of the Wapiti process
+        wapiti_pids+=($wapiti_pid)
+
+        wapiti_scanned_ports[$port]=1  # Mark this port as scanned
 
         # Start the spinner for this Wapiti process
         (spinner "Wapiti on Port $port") &
-        print_verbose "Wapiti command executed for $url: wapiti -u $url $WAPITI_OPTIONS -f txt -o $output_file" >/dev/null 2>&1
+        spinner_pid=$!
+
+        # Wait for Wapiti to complete and kill the spinner
+        wait $wapiti_pid
+        kill $spinner_pid 2>/dev/null
     done
 
     # Wait for all Wapiti processes to complete
     for pid in "${wapiti_pids[@]}"; do
         wait $pid
     done
-
-    # Check if Wapiti has not run properly due to no web server
-    for port in "${ports[@]}"; do
-        local output_file="${target_ip}_${port}_wapiti_output.txt"
-        if [ -f "$output_file" ]; then
-            if grep -q "Cannot establish connection" "$output_file"; then
-                print_status "No web server found on $target_ip:$port, Wapiti scan did not run."
-                echo "No web server found on $target_ip:$port" > "$output_file"
-            fi
-        fi
-    done
 }
 
-# Run Nikto scan on extracted ports in parallel
 run_nikto_scan() {
     local target_ip="$1"
     shift  # Shift the arguments to get only ports
     local ports=("$@")  # Capture all ports into an array
     local nikto_pids=()  # Array to hold the PIDs of background Nikto processes
+    declare -A nikto_scanned_ports  # Declare associative array locally
 
     for port in "${ports[@]}"; do
-        print_status "Starting Nikto scan on $target_ip:$port..."
+        if [ "${nikto_scanned_ports[$port]}" ]; then
+            continue
+        fi
+
+        print_status "$(date '+[%Y-%m-%d %H:%M:%S]') Starting Nikto scan on $target_ip:$port..."
 
         # Run Nikto in the background and immediately capture the PID
-        nikto -h "$target_ip" -p "$port" $NIKTO_OPTIONS -output "${target_ip}_${port}_nikto_output.txt" > /dev/null 2>&1 &
-        nikto_pids+=($!)  # Store the PID for later waiting
+        nikto -h "$target_ip" -p "$port" $NIKTO_OPTIONS -output "${target_ip}_${port}_nikto_output.txt" > "${target_ip}_${port}_nikto_output_log.txt" 2>&1 &
+        local nikto_pid=$!  # Store the PID for this particular Nikto process
+        nikto_pids+=($nikto_pid)  # Append the PID to the array
 
-        # Start the spinner in the background
+        nikto_scanned_ports[$port]=1  # Mark this port as scanned
+
+        # Start the spinner for this Nikto process
         (spinner "Nikto on Port $port") &
+        local spinner_pid=$!
+
+        # Wait for Nikto to complete and kill the spinner
+        wait $nikto_pid
+        kill $spinner_pid 2>/dev/null
+
         print_verbose "Nikto command executed for $target_ip:$port: nikto -h $target_ip -p $port $NIKTO_OPTIONS -output ${target_ip}_${port}_nikto_output.txt" >/dev/null 2>&1
     done
 
     # Wait for all Nikto processes to complete
     for pid in "${nikto_pids[@]}"; do
-        wait $pid  # Ensure that the script waits for each Nikto process
+        wait $pid
     done
 }
 
-ports=$(extract_web_servers)
-# Run Wapiti and Nikto scans concurrently
-run_wapiti_scan "$TARGET" $ports &
-wapiti_pid=$!
+# Get the open web server ports
+open_ports=$(get_open_web_ports)
 
-run_nikto_scan "$TARGET" $ports &
-nikto_pid=$!
+# If no open ports found, skip Wapiti and Nikto scans
+if [ -n "$open_ports" ]; then
+    # Run Wapiti and Nikto scans in parallel
+    run_wapiti_scan "$TARGET" $open_ports &
+    wapiti_pid=$!
+    run_nikto_scan "$TARGET" $open_ports &
+    nikto_pid=$!
 
-# Wait for both Wapiti and Nikto to complete
-wait $wapiti_pid
-wait $nikto_pid
+    # Wait for Wapiti and Nikto scans to complete
+    wait $wapiti_pid
+    wait $nikto_pid
+else
+    log_message "No open web server ports found. Skipping Wapiti and Nikto scans."
+fi
+
 
 # Merge results
 FINAL_OUTPUT_FILE="${TARGET}_${DATE_TIME}_final_scan_output.txt"
@@ -759,7 +807,7 @@ generate_html_report() {
         for group_name in web auth database common vuln; do
             local output_file="${TARGET}_${group_name}_${ip_version}_scan_output.txt"
             if [ -f "$output_file" ]; then
-                echo "<div class=\"scan-section\"><h2>${group_name^} Scan Results ($ip_version)</h2><pre>" >> "$HTML_REPORT_FILE"
+                echo "<div class=\"scan-section\"><h2>Nmap ${group_name^} Group Results ($ip_version)</h2><pre>" >> "$HTML_REPORT_FILE"
                 cat "$output_file" >> "$HTML_REPORT_FILE"
                 echo "</pre></div>" >> "$HTML_REPORT_FILE"
             fi
