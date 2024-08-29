@@ -12,7 +12,7 @@ handle_error() {
     echo "Cleaning up..."
     # Delete temp files
     rm -f *_output.txt
-    exit $exit_code
+    exit "$exit_code"
 }
 
 # Automatically trap errors and call the handle_error function
@@ -983,14 +983,9 @@ log_message "INFO" "$(date '+[%Y-%m-%d %H:%M:%S]') Total scan time: $formatted_s
 rm -f *_output.txt
 
 # Open the HTML report in the default browser as the non-root user
+# We have to do this because KDE 6.1 borked xdg-open
 if [ "$GENERATE_HTML_REPORT" = "true" ]; then
-    if command -v xdg-open &> /dev/null; then
-        export DISPLAY=:0
-        export XDG_RUNTIME_DIR="/tmp/runtime-$SUDO_USER"
-        sudo -u "$SUDO_USER" xdg-open "$HTML_REPORT_FILE" > /dev/null 2>&1
-    elif command -v open &> /dev/null; then
-        sudo -u "$SUDO_USER" open "$HTML_REPORT_FILE" > /dev/null 2>&1
-    fi
+        sudo -u "$SUDO_USER" x-www-browser "$HTML_REPORT_FILE" > /dev/null 2>&1 &
 fi
 
 exit 0
