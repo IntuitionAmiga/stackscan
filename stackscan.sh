@@ -629,10 +629,6 @@ run_wapiti_scan() {
         print_verbose "Executing Wapiti command: wapiti -u \"$url\" $WAPITI_OPTIONS -f txt -o \"$output_file\"" >>/dev/null 2>&1
 
         wapiti -u "$url" $WAPITI_OPTIONS -f txt -o "$output_file" > "${output_file}_log.txt" 2>&1 &
-        # Add dividing line after each scan's output
-        echo " " >> "${target_ip}_${port}_nikto_output_log.txt"
-        echo "------------------------------------------------------------------" >> "${target_ip}_${port}_nikto_output_log.txt"
-        echo " " >> "${target_ip}_${port}_nikto_output_log.txt"
 
         wapiti_pid=$!  # Capture the PID of the Wapiti process
         wapiti_pids+=($wapiti_pid)
@@ -650,6 +646,11 @@ run_wapiti_scan() {
         wait $wapiti_pid || true
         kill $spinner_pid 2>/dev/null
     done
+
+    # Add dividing line after each scan's output
+    echo " " >> "$output_file"
+    echo "------------------------------------------------------------------" >> "$output_file"
+    echo " " >> "$output_file"
 
     # Wait for all Wapiti processes to complete
     for pid in "${wapiti_pids[@]}"; do
@@ -677,15 +678,19 @@ run_nikto_scan() {
         fi
 
         print_status "$(date '+[%Y-%m-%d %H:%M:%S]') Starting Nikto scan on $target_ip:$port..."
+
+        # Define the output file
+        local output_file="${target_ip}_${port}_nikto_output.txt"
+
         # Log the exact Nikto command being executed
-        print_verbose "Executing Nikto command: nikto -h \"$target_ip\" -p \"$port\" $NIKTO_OPTIONS -output \"$output_file\"" >>/dev/null 2>&1
+        print_verbose "Nikto command executed for $target_ip:$port: nikto -h $target_ip -p $port $NIKTO_OPTIONS -output ${output_file}" >/dev/null 2>&1
 
         # Run Nikto in the background and immediately capture the PID
-        nikto -h "$target_ip" -p "$port" $NIKTO_OPTIONS -output "${target_ip}_${port}_nikto_output.txt" > "${target_ip}_${port}_nikto_output_log.txt" 2>&1 &
+        nikto -h "$target_ip" -p "$port" $NIKTO_OPTIONS -output "$output_file" > "${output_file}_log.txt" 2>&1 &
         # Add dividing line after each scan's output
-        echo " " >> "${target_ip}_${port}_nikto_output_log.txt"
-        echo "------------------------------------------------------------------" >> "${target_ip}_${port}_nikto_output_log.txt"
-        echo " " >> "${target_ip}_${port}_nikto_output_log.txt"
+        echo " " >> "$output_file"
+        echo "------------------------------------------------------------------" >> "$output_file"
+        echo " " >> "$output_file"
         local nikto_pid=$!  # Store the PID for this particular Nikto process
         nikto_pids+=($nikto_pid)  # Append the PID to the array
 
@@ -862,6 +867,7 @@ generate_html_report() {
     done
 
     # Wapiti Scan Results
+    # Read the Wapiti scan count from the temporary file
     if [ -f /tmp/wapiti_scan_count.txt ]; then
         wapiti_scan_count=$(cat /tmp/wapiti_scan_count.txt)
     else
@@ -869,20 +875,23 @@ generate_html_report() {
     fi
     echo "<div class=\"scan-section\"><h2>Wapiti Scan - $wapiti_scan_count Report(s)</h2><pre>" >> "$HTML_REPORT_FILE"
     wapiti_found=false
+
+    # Iterate over Wapiti result files for each scanned port
     for wapiti_file in ${TARGET}_*_wapiti_output.txt; do
         if [ -f "$wapiti_file" ] && [ -s "$wapiti_file" ]; then
-            echo "Results from: $wapiti_file" >> "$HTML_REPORT_FILE"
             cat "$wapiti_file" >> "$HTML_REPORT_FILE"
-            echo -e "\n" >> "$HTML_REPORT_FILE"
+            echo -e "\n" >> "$HTML_REPORT_FILE"  # Add a newline between results for readability
             wapiti_found=true
         fi
     done
+
     if [ "$wapiti_found" = false ]; then
         echo "No Wapiti results found." >> "$HTML_REPORT_FILE"
     fi
     echo "</pre></div>" >> "$HTML_REPORT_FILE"
 
     # Nikto Scan Results
+    # Read the Nikto scan count from the temporary file
     if [ -f /tmp/nikto_scan_count.txt ]; then
         nikto_scan_count=$(cat /tmp/nikto_scan_count.txt)
     else
@@ -890,14 +899,21 @@ generate_html_report() {
     fi
     echo "<div class=\"scan-section\"><h2>Nikto Scan - $nikto_scan_count Report(s)</h2><pre>" >> "$HTML_REPORT_FILE"
     nikto_found=false
+
+    # Iterate over Nikto result files for each scanned port
     for nikto_file in ${TARGET}_*_nikto_output.txt; do
         if [ -f "$nikto_file" ] && [ -s "$nikto_file" ]; then
-            echo "Results from: $nikto_file" >> "$HTML_REPORT_FILE"
-            cat "$nikto_file" >> "$HTML_REPORT_FILE"
-            echo -e "\n" >> "$HTML_REPORT_FILE"  # Add a newline between results for readability
-            nikto_found=true
+            # Count the number of lines in the file
+            line_count=$(wc -l < "$nikto_file")
+            # Include only if there is more than one line
+            if [ "$line_count" -gt 1 ]; then
+                cat "$nikto_file" >> "$HTML_REPORT_FILE"
+                echo -e "\n" >> "$HTML_REPORT_FILE"  # Add a newline between results for readability
+                nikto_found=true
+            fi
         fi
     done
+
     if [ "$nikto_found" = false ]; then
         echo "No Nikto results found." >> "$HTML_REPORT_FILE"
     fi
