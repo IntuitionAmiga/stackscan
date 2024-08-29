@@ -11,7 +11,7 @@ handle_error() {
     log_message "ERROR" "Error occurred on line ${line_number}."
     echo "Cleaning up..."
     # Delete temp files
-    rm -f *_output.txt
+    rm -f ./*_output.txt
     exit "$exit_code"
 }
 
@@ -101,7 +101,7 @@ create_default_config() {
         exit 1
     fi
 
-    cat <<EOL > /home/$SUDO_USER/.stackscan.conf
+    cat <<EOL > /home/"$SUDO_USER"/.stackscan.conf
 # Default Nmap options
 NMAP_OPTIONS="-Pn"  # More general, no aggressive scanning options
 
@@ -222,11 +222,11 @@ EOL
 
     log_message "INFO" "Default configuration file created at /home/$SUDO_USER/.stackscan.conf"
     sync
-    chown $SUDO_USER:$SUDO_USER /home/$SUDO_USER/.stackscan.conf
-    chmod 600 /home/$SUDO_USER/.stackscan.conf
+    chown "$SUDO_USER":"$SUDO_USER" /home/"$SUDO_USER"/.stackscan.conf
+    chmod 600 /home/"$SUDO_USER"/.stackscan.conf
 
     if [ -f "/home/$SUDO_USER/.stackscan.conf" ]; then
-        source /home/$SUDO_USER/.stackscan.conf
+        source /home/"$SUDO_USER"/.stackscan.conf
     else
         log_message "ERROR" "Failed to create and source the configuration file."
         exit 1
@@ -249,7 +249,6 @@ TARGET="$1"
 DATE_TIME=$(date +"%Y%m%d_%H%M%S")
 LOG_FILE="${TARGET}_${DATE_TIME}_scan.log"
 HTML_REPORT_FILE="${TARGET}_${DATE_TIME}_scan_report.html"
-NIKTO_OUTPUT_FILE="${TARGET}_${DATE_TIME}_nikto_output.txt"
 
 # Function to print the banner to console and log file
 print_banner() {
@@ -376,31 +375,44 @@ fi
 
 # Spinner function
 spinner() {
-    local delay=0.1
+    local delay
+    delay=0.1
     local spinstr='|/-\'
-    local scan_name="$1"
-    local start_time=$(date +%s)  # Capture the start time
+
+    local scan_name
+    scan_name="$1"
+    local start_time
+    start_time=$(date +%s)  # Capture the start time
 
     while kill -0 $! 2>/dev/null; do
         # Calculate elapsed time
-        local current_time=$(date +%s)
-        local elapsed_time=$((current_time - start_time))
+        local current_time
+        current_time=$(date +%s)
+        local elapsed_time
+        elapsed_time=$((current_time - start_time))
 
         # Format elapsed time as HH:MM:SS
-        local hours=$((elapsed_time / 3600))
-        local minutes=$(( (elapsed_time % 3600) / 60 ))
-        local seconds=$((elapsed_time % 60))
-        local formatted_time=$(printf "%02d:%02d:%02d" $hours $minutes $seconds)
+        local hours
+        hours=$((elapsed_time / 3600))
+        local minutes
+        minutes=$(( (elapsed_time % 3600) / 60 ))
+        local seconds
+        seconds=$((elapsed_time % 60))
+        local formatted_time
+        formatted_time=$(printf "%02d:%02d:%02d" $hours $minutes $seconds)
 
         # Create the spinner string
-        local temp=${spinstr#?}
-        local spinner_str=$(printf " [%c] %s (%s)" "$spinstr" "$scan_name" "$formatted_time")
+        local temp
+        temp=${spinstr#?}
+        local spinner_str
+        spinner_str=$(printf " [%c] %s (%s)" "$spinstr" "$scan_name" "$formatted_time")
         spinstr=$temp${spinstr%"$temp"}
 
         # Calculate the padding needed to right-align the spinner
-        local terminal_width=$(tput cols)
-        local spinner_length=${#spinner_str}
-        local padding=$((terminal_width - spinner_length))
+        local terminal_width
+        terminal_width=$(tput cols)
+        #local spinner_length=${#spinner_str}
+        #local padding=$((terminal_width - spinner_length))
 
         # Display the right-justified spinner
         printf "%*s\r" "$terminal_width" "$spinner_str"
@@ -563,7 +575,8 @@ get_open_web_ports() {
 
     # Check and extract from the IPv4 scan output
     if [ -f "$ipv4_file" ]; then
-        local ipv4_ports=$(awk '
+        local ipv4_ports
+        ipv4_ports=$(awk '
         /^[0-9]+\/tcp\s+open/ {  # Match lines with open TCP ports
             if ($3 ~ /^http/) {  # Check if the service name starts with "http"
                 split($1, port_info, "/")  # Split the port information
@@ -577,7 +590,8 @@ get_open_web_ports() {
 
     # Check and extract from the IPv6 scan output if available
     if [ -f "$ipv6_file" ]; then
-        local ipv6_ports=$(awk '
+        local ipv6_ports
+        ipv6_ports=$(awk '
         /^[0-9]+\/tcp\s+open/ {  # Match lines with open TCP ports
             if ($3 ~ /^http/) {  # Check if the service name starts with "http"
                 split($1, port_info, "/")
@@ -752,7 +766,7 @@ fi
 
 # Merge results
 FINAL_OUTPUT_FILE="${TARGET}_${DATE_TIME}_final_scan_output.txt"
-cat *_scan_output.txt > "$FINAL_OUTPUT_FILE"
+cat ./*_scan_output.txt > "$FINAL_OUTPUT_FILE"
 
 # Print final status messages
 print_status "$(date '+[%Y-%m-%d %H:%M:%S]') Scanning complete for $TARGET."
@@ -858,7 +872,8 @@ generate_html_report() {
             local output_file="${TARGET}_${group_name}_${ip_version}_scan_output.txt"
             if [ -f "$output_file" ]; then
                 # Count the number of Nmap commands executed by counting the occurrence of "Executing Nmap Command" in the output file
-                local scan_count=$(grep -c "Executing Nmap Command" "$output_file")
+                local scan_count
+                scan_count=$(grep -c "Executing Nmap Command" "$output_file")
                 echo "<div class=\"scan-section\"><h2>Nmap ${group_name^} Group - $scan_count Scan Report(s) ($ip_version)</h2><pre>" >> "$HTML_REPORT_FILE"
                 cat "$output_file" >> "$HTML_REPORT_FILE"
                 echo "</pre></div>" >> "$HTML_REPORT_FILE"
@@ -934,7 +949,8 @@ generate_html_report() {
             if echo "$line" | grep -q "CVE-"; then
                 cve_id=$(echo "$line" | grep -o "CVE-[0-9]\+-[0-9]\+")
                 if [ -n "$cve_id" ]; then
-                    local cve_info=$(lookup_cve_details "$cve_id")
+                    local cve_info
+                    cve_info=$(lookup_cve_details "$cve_id")
                     severity=$(echo "$cve_info" | cut -d',' -f1)
                     cvss_score=$(echo "$cve_info" | cut -d',' -f2)
                 fi
@@ -973,14 +989,14 @@ fi
 
 # Ensure all created files are owned by the user running the script
 if [ -n "$SUDO_USER" ]; then
-    chown $SUDO_USER:$SUDO_USER "$LOG_FILE" "$HTML_REPORT_FILE"
+    chown "$SUDO_USER":"$SUDO_USER" "$LOG_FILE" "$HTML_REPORT_FILE"
 fi
 
 # Print total scan duration
 log_message "INFO" "$(date '+[%Y-%m-%d %H:%M:%S]') Total scan time: $formatted_scan_duration"
 
 # Clean up the temporary files
-rm -f *_output.txt
+rm -f ./*_output.txt
 
 # Open the HTML report in the default browser as the non-root user
 # We have to do this because KDE 6.1 borked xdg-open
