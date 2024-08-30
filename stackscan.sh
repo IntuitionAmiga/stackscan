@@ -212,6 +212,12 @@ NIKTO_OPTIONS="-timeout 10"
 # Wapiti scan options
 WAPITI_OPTIONS="--flush-session --scope domain -d 5 --max-links-per-page 100 --flush-attacks --max-scan-time 1800 --timeout 10 -m all --verify-ssl 1"
 
+# WPScan options
+WPSCAN_OPTIONS="--random-user-agent --disable-tls-checks --max-threads 10"
+
+# SQLMap options
+SQLMAP_OPTIONS="--batch --random-agent --level=3 --risk=2"
+
 # Report generation
 GENERATE_HTML_REPORT="true"
 
@@ -238,7 +244,6 @@ EOL
         exit 1
     fi
 }
-
 
 # Now load the configuration
 load_config
@@ -293,7 +298,6 @@ if [ "$1" == "-v" ]; then
     shift  # Remove the -v from the argument list
 fi
 
-
 # Function to validate the target domain, IPv4, or IPv6 address
 validate_target() {
     # Regex for valid domain name (simple check)
@@ -324,7 +328,6 @@ validate_target() {
 
 # Validate the target input
 validate_target "$TARGET"
-
 
 # Check required commands
 check_required_commands() {
@@ -392,25 +395,18 @@ spinner() {
         elapsed_time=$((current_time - start_time))
 
         # Format elapsed time as HH:MM:SS
-        local hours
-        hours=$((elapsed_time / 3600))
-        local minutes
-        minutes=$(( (elapsed_time % 3600) / 60 ))
-        local seconds
-        seconds=$((elapsed_time % 60))
-        local formatted_time
-        formatted_time=$(printf "%02d:%02d:%02d" $hours $minutes $seconds)
+        local hours=$((elapsed_time / 3600))
+        local minutes=$(( (elapsed_time % 3600) / 60 ))
+        local seconds=$((elapsed_time % 60))
+        local formatted_time=$(printf "%02d:%02d:%02d" $hours $minutes $seconds)
 
         # Create the spinner string
-        local temp
-        temp=${spinstr#?}
-        local spinner_str
-        spinner_str=$(printf " [%c] %s (%s)" "$spinstr" "$scan_name" "$formatted_time")
+        local temp=${spinstr#?}
+        local spinner_str=$(printf " [%c] %s (%s)" "$spinstr" "$scan_name" "$formatted_time")
         spinstr=$temp${spinstr%"$temp"}
 
         # Calculate the padding needed to right-align the spinner
-        local terminal_width
-        terminal_width=$(tput cols)
+        local terminal_width=$(tput cols)
         #local spinner_length=${#spinner_str}
         #local padding=$((terminal_width - spinner_length))
 
@@ -420,7 +416,6 @@ spinner() {
     done
     printf "    \r"  # Clear spinner after process is done
 }
-
 # Function to expand wildcard patterns to actual script names
 expand_wildcard_scripts() {
     local script_pattern="$1"
@@ -432,7 +427,6 @@ expand_wildcard_scripts() {
     # Return the expanded script names as an array
     echo "${expanded_scripts[@]}"
 }
-
 # Function to execute Nmap with scripts and their arguments
 run_nmap_with_scripts() {
     local scripts=("$1")
@@ -467,9 +461,8 @@ run_nmap_with_scripts() {
     done
 
     # Execute the Nmap command
-    $nmap_command > /dev/null 2>&1 &
+    ($nmap_command > /dev/null 2>&1) &
 }
-
 # Function to run a group scan
 run_scan_group() {
     local group_name="$1"
@@ -518,13 +511,14 @@ run_scan_group() {
             echo "------------------------------------------------------------------" >> "$output_file"
             echo " " >> "$output_file"
 
-            spinner "Nmap $group_name scan - Script: $expanded_script"
+            (spinner "Nmap $group_name scan - Script: $expanded_script") &
             print_verbose "Nmap command executed for $group_name ($ip_version), Script: $expanded_script: $individual_nmap_command" >/dev/null 2>&1
         done
 
     done
+    print_status "$(date '+[%Y-%m-%d %H:%M:%S]') Nmap $group_name scan on $target_ip ($ip_version) completed."
+    print_verbose "$(date '+[%Y-%m-%d %H:%M:%S]') Nmap $group_name scan on $target_ip ($ip_version) completed." >>/dev/null 2>&1
 }
-
 # Function to execute scans in parallel for IPv4 and IPv6
 run_scans() {
     local ip_version="$1"
@@ -536,7 +530,10 @@ run_scans() {
 
     # Run other scan groups in the background (no need to capture these PIDs for now)
     run_scan_group "auth" AUTH_NMAP_SCRIPTS[@] AUTH_NMAP_SCRIPT_ARGS[@] "$AUTH_PORTS" "$ip_version" "$target_ip" &
+
     run_scan_group "database" DATABASE_NMAP_SCRIPTS[@] DATABASE_NMAP_SCRIPT_ARGS[@] "$DATABASE_PORTS" "$ip_version" "$target_ip" &
+    database_scan_pid=$!
+
     run_scan_group "common" COMMON_NMAP_SCRIPTS[@] COMMON_NMAP_SCRIPT_ARGS[@] "$COMMON_PORTS" "$ip_version" "$target_ip" &
     run_scan_group "vuln" VULN_NMAP_SCRIPTS[@] VULN_NMAP_SCRIPT_ARGS[@] "$VULN_PORTS" "$ip_version" "$target_ip" &
 
@@ -549,25 +546,7 @@ run_scans() {
         fi
     fi
 }
-
-
-# Run for IPv4 and capture the web scan PID
-run_scans "IPv4" "$TARGET"
-web_scan_pid_v4=$web_scan_pid
-
-# Run for IPv6 only if supported and the target is not an IPv4 address, capture the web scan PID
-if [ "$IPV6_SUPPORTED" = true ] && [ "$TARGET_TYPE" != "IPv4" ]; then
-    run_scans "IPv6" "$TARGET"
-    web_scan_pid_v6=$web_scan_pid
-fi
-
-# Wait for the web-related Nmap scans to finish so that we can extract the web server port numbers
-wait $web_scan_pid_v4
-if [ -n "$web_scan_pid_v6" ]; then
-    wait $web_scan_pid_v6
-fi
-
-# Extract any open web server ports and scan them with Wapiti and Nikto
+# Extract any open web server ports and scan them with Wapiti, Nikto, WPScan and SQLMap
 get_open_web_ports() {
     local ipv4_file="${TARGET}_web_IPv4_scan_output.txt"
     local ipv6_file="${TARGET}_web_IPv6_scan_output.txt"
@@ -616,7 +595,6 @@ get_open_web_ports() {
 
     return 0
 }
-
 run_wapiti_scan() {
     local target_ip="$1"
     shift  # Shift the arguments to get only ports
@@ -637,12 +615,12 @@ run_wapiti_scan() {
             url="https://$target_ip:$port"
         fi
 
-        print_status "$(date '+[%Y-%m-%d %H:%M:%S]') Starting Wapiti scan on $url..."
+        print_status "$(date '+[%Y-%m-%d %H:%M:%S]') Starting Wapiti scan on $target_ip:$port..."
         local output_file="${target_ip}_${port}_wapiti_output.txt"
         # Log the exact Wapiti command being executed
         print_verbose "Executing Wapiti command: wapiti -u \"$url\" $WAPITI_OPTIONS -f txt -o \"$output_file\"" >>/dev/null 2>&1
 
-        wapiti -u "$url" $WAPITI_OPTIONS -f txt -o "$output_file" > "${output_file}_log.txt" 2>&1 &
+        (wapiti -u "$url" $WAPITI_OPTIONS -f txt -o "$output_file" > "${output_file}_log.txt" 2>&1) &
 
         wapiti_pid=$!  # Capture the PID of the Wapiti process
         wapiti_pids+=($wapiti_pid)
@@ -673,8 +651,10 @@ run_wapiti_scan() {
 
     # Store the number of Wapiti scans
     echo "$wapiti_scan_count" > /tmp/wapiti_scan_count.txt
-}
 
+    print_status "$(date '+[%Y-%m-%d %H:%M:%S]') Wapiti scan on $target_ip:$port completed."
+    print_verbose "$(date '+[%Y-%m-%d %H:%M:%S]') Wapiti scan on $target_ip:$port completed." >>/dev/null 2>&1
+}
 run_nikto_scan() {
     local target_ip="$1"
     shift  # Shift the arguments to get only ports
@@ -700,7 +680,8 @@ run_nikto_scan() {
         print_verbose "Nikto command executed for $target_ip:$port: nikto -h $target_ip -p $port $NIKTO_OPTIONS -output ${output_file}" >/dev/null 2>&1
 
         # Run Nikto in the background and immediately capture the PID
-        nikto -h "$target_ip" -p "$port" $NIKTO_OPTIONS -output "$output_file" > "${output_file}_log.txt" 2>&1 &
+        (nikto -h "$target_ip" -p "$port" $NIKTO_OPTIONS -output "$output_file" > "${output_file}_log.txt" 2>&1) &
+
         # Add dividing line after each scan's output
         echo " " >> "$output_file"
         echo "------------------------------------------------------------------" >> "$output_file"
@@ -731,38 +712,246 @@ run_nikto_scan() {
 
     # Store the number of Nikto scans
     echo "$nikto_scan_count" > /tmp/nikto_scan_count.txt
+
+    print_status "$(date '+[%Y-%m-%d %H:%M:%S]') Nikto scan on $target_ip:$port completed."
+    print_verbose "$(date '+[%Y-%m-%d %H:%M:%S]') Nikto scan on $target_ip:$port completed." >>/dev/null 2>&1
+}
+run_wpscan_scan() {
+    local target_ip="$1"
+    shift  # Shift the arguments to get only ports
+    local ports=("$@")  # Capture all ports into an array
+    local wpscan_pids=()  # Array to hold the PIDs of background WPScan processes
+    declare -A wpscan_scanned_ports  # Declare associative array locally
+
+    local wpscan_scan_count=0  # Initialize a counter
+
+    for port in "${ports[@]}"; do
+        if [ "${wpscan_scanned_ports[$port]}" ]; then
+            continue  # Skip if already scanned
+        fi
+
+        local url="http://$target_ip:$port"
+        if [[ "$port" == "443" || "$port" == "8443" ]]; then
+            url="https://$target_ip:$port"
+        fi
+
+        print_status "$(date '+[%Y-%m-%d %H:%M:%S]') Starting WPScan on $url..."
+        local output_file="${target_ip}_${port}_wpscan_output.txt"
+
+        # Log the exact WPScan command being executed
+        print_verbose "WPScan command executed for $url: wpscan $WPSCAN_OPTIONS --url $url > $output_file" >/dev/null 2>&1
+
+        (sudo -u "$SUDO_USER" wpscan $WPSCAN_OPTIONS --url "$url" > "$output_file" 2>&1) &
+        wpscan_pid=$!  # Capture the PID of the WPScan process
+        wpscan_pids+=($wpscan_pid)
+
+        wpscan_scanned_ports[$port]=1  # Mark this port as scanned
+
+        # Increment the counter
+        ((wpscan_scan_count++))
+
+        # Start the spinner for this WPScan process
+        (spinner "WPScan on Port $port") &
+        spinner_pid=$!
+
+        # Wait for WPScan to complete and kill the spinner
+        wait $wpscan_pid || true
+        kill $spinner_pid 2>/dev/null
+
+        # Add dividing line after each scan's output
+        echo " " >> "$output_file"
+        echo "------------------------------------------------------------------" >> "$output_file"
+        echo " " >> "$output_file"
+    done
+
+    # Wait for all WPScan processes to complete
+    for pid in "${wpscan_pids[@]}"; do
+        wait $pid || true
+    done
+
+    # Store the number of WPScan scans
+    echo "$wpscan_scan_count" > /tmp/wpscan_scan_count.txt
+
+    print_status "$(date '+[%Y-%m-%d %H:%M:%S]') WPScan scan on $target_ip:$port completed."
+    print_verbose "$(date '+[%Y-%m-%d %H:%M:%S]') WPScan scan on $target_ip:$port completed." >>/dev/null 2>&1
+}
+run_sqlmap_scan() {
+    local target_ip="$1"
+    shift  # Shift the arguments to get only ports
+    local ports=("$@")  # Capture all ports into an array
+    local sqlmap_pids=()  # Array to hold the PIDs of background SQLMap processes
+    declare -A sqlmap_scanned_ports  # Declare associative array locally
+
+    local sqlmap_scan_count=0  # Initialize a counter
+
+    for port in "${ports[@]}"; do
+        if [ "${sqlmap_scanned_ports[$port]}" ]; then
+            continue  # Skip if already scanned
+        fi
+
+        local url="http://$target_ip:$port"
+        if [[ "$port" == "443" || "$port" == "8443" ]]; then
+            url="https://$target_ip:$port"
+        fi
+
+        print_status "$(date '+[%Y-%m-%d %H:%M:%S]') Starting SQLMap on $url..."
+        local output_file="${target_ip}_${port}_sqlmap_output.txt"
+
+        # Log the exact SQLmap command being executed
+        print_verbose "SQLMap command executed for $url: sqlmap $SQLMAP_OPTIONS -u \"$url\" > $output_file" >/dev/null 2>&1
+
+        (sudo -u "$SUDO_USER" sqlmap $SQLMAP_OPTIONS -u "$url" > "$output_file" 2>&1) &
+        sqlmap_pid=$!  # Capture the PID of the SQLMap process
+        sqlmap_pids+=($sqlmap_pid)
+
+        sqlmap_scanned_ports[$port]=1  # Mark this port as scanned
+
+        # Increment the counter
+        ((sqlmap_scan_count++))
+
+        # Start the spinner for this SQLMap process
+        (spinner "SQLMap on Port $port") &
+        spinner_pid=$!
+
+        # Wait for SQLMap to complete and kill the spinner
+        wait $sqlmap_pid || true
+        kill $spinner_pid 2>/dev/null
+
+        # Add dividing line after each scan's output
+        echo " " >> "$output_file"
+        echo "------------------------------------------------------------------" >> "$output_file"
+        echo " " >> "$output_file"
+    done
+
+    # Wait for all SQLMap processes to complete
+    for pid in "${sqlmap_pids[@]}"; do
+        wait $pid || true
+    done
+
+    # Store the number of SQLMap scans
+    echo "$sqlmap_scan_count" > /tmp/sqlmap_scan_count.txt
+
+    print_status "$(date '+[%Y-%m-%d %H:%M:%S]') SQLMap scan on $target_ip:$port completed."
+    print_verbose "$(date '+[%Y-%m-%d %H:%M:%S]') SQLMap scan on $target_ip:$port completed." >>/dev/null 2>&1
+}
+# Function to detect WordPress and SQL databases in both IPv4 and IPv6 outputs
+detect_services() {
+    local target_ip="$1"
+    local wp_detected=false
+    local sql_detected=false
+
+    # Check the Nmap IPv4 output for web services (WordPress)
+    local nmap_web_output_v4="${target_ip}_web_IPv4_scan_output.txt"
+    if [ -f "$nmap_web_output_v4" ] && grep -qis "<meta name=\"generator\" content=\"WordPress\"" "$nmap_web_output_v4"; then
+        wp_detected=true
+    fi
+
+    # Check the Nmap IPv6 output for web services (WordPress)
+    local nmap_web_output_v6="${target_ip}_web_IPv6_scan_output.txt"
+    if [ -f "$nmap_web_output_v6" ] && grep -qis "<meta name=\"generator\" content=\"WordPress\"" "$nmap_web_output_v6"; then
+        wp_detected=true
+    fi
+
+    # Check the Nmap IPv4 output for all 35 SQL database services known to SQLMap
+    local nmap_db_output_v4="${target_ip}_database_IPv4_scan_output.txt"
+    if [ -f "$nmap_db_output_v4" ] && grep -qis -e "mysql" -e "postgresql" -e "mssql" -e "mariadb" -e "oracle" -e "sybase" -e "db2" -e "sqlite" -e "access" -e "firebird" -e "informix" -e "teradata" -e "memsql" -e "dynamodb" -e "arangodb" -e "couchdb" -e "mongodb" -e "monetdb" -e "mckoi" -e "presto" -e "altibase" -e "cubrid" -e "intersystems cache" -e "tibero" -e "columnstore" -e "vertica" -e "mimer" -e "hana" -e "redshift" -e "clickhouse" -e "cockroachdb" -e "greenplum" -e "nuodb" -e "oceanbase" "$nmap_db_output_v4"; then
+        sql_detected=true
+    fi
+
+    # Check the Nmap IPv6 output for all 35 SQL database services known to SQLMap
+    local nmap_db_output_v6="${target_ip}_database_IPv6_scan_output.txt"
+    if [ -f "$nmap_db_output_v6" ] && grep -qis -e "mysql" -e "postgresql" -e "mssql" -e "mariadb" -e "oracle" -e "sybase" -e "db2" -e "sqlite" -e "access" -e "firebird" -e "informix" -e "teradata" -e "memsql" -e "dynamodb" -e "arangodb" -e "couchdb" -e "mongodb" -e "monetdb" -e "mckoi" -e "presto" -e "altibase" -e "cubrid" -e "intersystems cache" -e "tibero" -e "columnstore" -e "vertica" -e "mimer" -e "hana" -e "redshift" -e "clickhouse" -e "cockroachdb" -e "greenplum" -e "nuodb" -e "oceanbase" "$nmap_db_output_v6"; then
+        sql_detected=true
+    fi
+
+    # Return the results
+    echo "$wp_detected $sql_detected"
 }
 
-# Get the open web server ports
-open_ports=$(get_open_web_ports)
+# Run for IPv4 and capture the web and database scan PIDs
+run_scans "IPv4" "$TARGET"
+web_scan_pid_v4=$web_scan_pid
+database_scan_pid_v4=$database_scan_pid
 
-# If no open ports found, skip Wapiti and Nikto scans
-if [ -n "$open_ports" ]; then
-    # Run Wapiti and Nikto scans in parallel
-    run_wapiti_scan "$TARGET" $open_ports &
-    wapiti_pid=$!
-    run_nikto_scan "$TARGET" $open_ports &
-    nikto_pid=$!
-
-    # Wait for Wapiti scan to complete
-    wait $wapiti_pid
-    wapiti_status=$?
-    if [ $wapiti_status -ne 0 ]; then
-        log_message "WARNING: Wapiti scan process exited with status $wapiti_status."
-    fi
-
-    # Wait for Nikto scan to complete
-    wait $nikto_pid
-    nikto_status=$?
-    if [ $nikto_status -ne 0 ]; then
-        log_message "ERROR: Nikto scan process exited with status $nikto_status."
-        # Continue script even if Nikto fails
-    fi
-else
-    log_message "No open web server ports found. Skipping Wapiti and Nikto scans."
+# Run for IPv6 only if supported and the target is not an IPv4 address, capture the web scan PID
+if [ "$IPV6_SUPPORTED" = true ] && [ "$TARGET_TYPE" != "IPv4" ]; then
+    run_scans "IPv6" "$TARGET"
+    web_scan_pid_v6=$web_scan_pid
 fi
 
+# Wait for the web-related Nmap scans to finish so that we can extract the web server port numbers
+wait $web_scan_pid_v4
+if [ -n "$web_scan_pid_v6" ]; then
+    wait $web_scan_pid_v6
+fi
 
+# Extract any open web server ports and scan them with Wapiti and Nikto
+open_ports=$(get_open_web_ports)
+# Remove duplicate ports from open_ports
+open_ports=$(echo "$open_ports" | tr ' ' '\n' | sort -u | tr '\n' ' ')
+
+# Initialize arrays to hold PIDs
+wapiti_pids=()
+nikto_pids=()
+wpscan_pids=()
+sqlmap_pids=()
+
+# If no open ports found, skip all scans
+if [ -n "$open_ports" ]; then
+    # Run Wapiti scans in parallel
+    run_wapiti_scan "$TARGET" $open_ports &
+    wapiti_pids+=($!)  # Append the PID of the Wapiti process to the array
+
+    # Run Nikto scans in parallel
+    run_nikto_scan "$TARGET" $open_ports &
+    nikto_pids+=($!)  # Append the PID of the Nikto process to the array
+
+    # Wait for the database-related Nmap scans to finish
+    wait $database_scan_pid_v4
+    if [ -n "$database_scan_pid_v6" ]; then
+        wait $database_scan_pid_v6
+    fi
+
+    # Detect services after database scan
+    services_detection=$(detect_services "$TARGET")
+    wp_detected=$(echo "$services_detection" | awk '{print $1}')
+    sql_detected=$(echo "$services_detection" | awk '{print $2}')
+
+    # Run WPScan only if WordPress was detected
+    if [ "$wp_detected" = "true" ]; then
+        run_wpscan_scan "$TARGET" $open_ports &
+        wpscan_pids+=($!)  # Append the PID of the WPScan process to the array
+    fi
+
+    # Run SQLMap only if an SQL database was detected
+    if [ "$sql_detected" = true ]; then
+        run_sqlmap_scan "$TARGET" $open_ports &
+        sqlmap_pids+=($!)  # Append the PID of the SQLMap process to the array
+    fi
+fi
+
+# Wait for all Wapiti processes to complete
+for pid in "${wapiti_pids[@]}"; do
+    wait $pid || true
+done
+
+# Wait for all Nikto processes to complete
+for pid in "${nikto_pids[@]}"; do
+    wait $pid || true
+done
+
+# Wait for all WPScan processes to complete
+for pid in "${wpscan_pids[@]}"; do
+    wait $pid || true
+done
+
+# Wait for all SQLMap processes to complete
+for pid in "${sqlmap_pids[@]}"; do
+    wait $pid || true
+done
+
+# Wait for other background processes if any
+wait $nmap_pid
 
 # Merge results
 FINAL_OUTPUT_FILE="${TARGET}_${DATE_TIME}_final_scan_output.txt"
@@ -808,7 +997,7 @@ lookup_cve_by_service_version() {
 
     # Fetch CVE details from NVD with proper headers
     local cve_details
-    cve_details=$(curl -s -H "User-Agent: YourScriptName/1.0" "$nvd_api_url")
+    cve_details=$(curl -s -H "User-Agent: Stackscan/0.1" "$nvd_api_url")
 
     # Debugging: Print the raw API response
     echo "API Response for $service_name $version: $cve_details" >> "$LOG_FILE"
@@ -888,7 +1077,11 @@ generate_html_report() {
     else
         wapiti_scan_count=0
     fi
-    echo "<div class=\"scan-section\"><h2>Wapiti Scan - $wapiti_scan_count Report(s)</h2><pre>" >> "$HTML_REPORT_FILE"
+    if [ "$wapiti_scan_count" -gt 0 ]; then
+        echo "<div class=\"scan-section\"><h2>Wapiti Scan - $wapiti_scan_count Report(s)</h2><pre>" >> "$HTML_REPORT_FILE"
+    else
+        echo "<div class=\"scan-section\"><h2>Wapiti Scan - 0 Report(s)</h2><pre>" >> "$HTML_REPORT_FILE"
+    fi
     wapiti_found=false
 
     # Iterate over Wapiti result files for each scanned port
@@ -912,7 +1105,11 @@ generate_html_report() {
     else
         nikto_scan_count=0
     fi
-    echo "<div class=\"scan-section\"><h2>Nikto Scan - $nikto_scan_count Report(s)</h2><pre>" >> "$HTML_REPORT_FILE"
+    if [ "$nikto_scan_count" -gt 0 ]; then
+        echo "<div class=\"scan-section\"><h2>Nikto Scan - $nikto_scan_count Report(s)</h2><pre>" >> "$HTML_REPORT_FILE"
+    else
+        echo "<div class=\"scan-section\"><h2>Nikto Scan - 0 Report(s)</h2><pre>" >> "$HTML_REPORT_FILE"
+    fi
     nikto_found=false
 
     # Iterate over Nikto result files for each scanned port
@@ -931,6 +1128,60 @@ generate_html_report() {
 
     if [ "$nikto_found" = false ]; then
         echo "No Nikto results found." >> "$HTML_REPORT_FILE"
+    fi
+    echo "</pre></div>" >> "$HTML_REPORT_FILE"
+
+        # WPScan Scan Results
+        if [ -f /tmp/wpscan_scan_count.txt ]; then
+            wpscan_scan_count=$(cat /tmp/wpscan_scan_count.txt)
+        else
+            wpscan_scan_count=0
+        fi
+        if [ "$wpscan_scan_count" -gt 0 ]; then
+            echo "<div class=\"scan-section\"><h2>WPScan - $wpscan_scan_count Report(s)</h2><pre>" >> "$HTML_REPORT_FILE"
+        else
+            echo "<div class=\"scan-section\"><h2>WPScan - 0 Report(s)</h2><pre>" >> "$HTML_REPORT_FILE"
+        fi
+        wpscan_found=false
+
+        # Iterate over WPScan result files for each scanned port
+        for wpscan_file in ${TARGET}_*_wpscan_output.txt; do
+            if [ -f "$wpscan_file" ] && [ -s "$wpscan_file" ]; then
+                cat "$wpscan_file" >> "$HTML_REPORT_FILE"
+                echo -e "\n" >> "$HTML_REPORT_FILE"  # Add a newline between results for readability
+                wpscan_found=true
+            fi
+        done
+
+        if [ "$wpscan_found" = false ]; then
+            echo "No WPScan results found." >> "$HTML_REPORT_FILE"
+        fi
+        echo "</pre></div>" >> "$HTML_REPORT_FILE"
+
+    # SQLMap Scan Results
+    if [ -f /tmp/sqlmap_scan_count.txt ]; then
+        sqlmap_scan_count=$(cat /tmp/sqlmap_scan_count.txt)
+    else
+        sqlmap_scan_count=0
+    fi
+    if [ "$sqlmap_scan_count" -gt 0 ]; then
+        echo "<div class=\"scan-section\"><h2>SQLMap - $sqlmap_scan_count Report(s)</h2><pre>" >> "$HTML_REPORT_FILE"
+    else
+        echo "<div class=\"scan-section\"><h2>SQLMap - 0 Report(s)</h2><pre>" >> "$HTML_REPORT_FILE"
+    fi
+    sqlmap_found=false
+
+    # Iterate over SQLMap result files for each scanned port
+    for sqlmap_file in ${TARGET}_*_sqlmap_output.txt; do
+        if [ -f "$sqlmap_file" ] && [ -s "$sqlmap_file" ]; then
+            cat "$sqlmap_file" >> "$HTML_REPORT_FILE"
+            echo -e "\n" >> "$HTML_REPORT_FILE"  # Add a newline between results for readability
+            sqlmap_found=true
+        fi
+    done
+
+    if [ "$sqlmap_found" = false ]; then
+        echo "No SQLMap results found." >> "$HTML_REPORT_FILE"
     fi
     echo "</pre></div>" >> "$HTML_REPORT_FILE"
 
@@ -992,11 +1243,16 @@ if [ -n "$SUDO_USER" ]; then
     chown "$SUDO_USER":"$SUDO_USER" "$LOG_FILE" "$HTML_REPORT_FILE"
 fi
 
+#wait for any background jobs to finish
+(spinner "Waiting for background jobs to finish...") &
+wait
+sync &
+
 # Print total scan duration
-log_message "INFO" "$(date '+[%Y-%m-%d %H:%M:%S]') Total scan time: $formatted_scan_duration"
+log_message "INFO" "$(date '+[%Y-%m-%d %H:%M:%S]') Total execution time: $formatted_scan_duration"
 
 # Clean up the temporary files
-rm -f ./*_output.txt
+rm -f ./*_output.txt &
 
 # Open the HTML report in the default browser as the non-root user
 # We have to do this because KDE 6.1 borked xdg-open
