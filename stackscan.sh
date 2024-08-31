@@ -895,9 +895,15 @@ if [ -n "$web_scan_pid_v6" ]; then
 fi
 
 # Extract any open web server ports and scan them with Wapiti and Nikto
-open_ports=$(get_open_web_ports)
-# Remove duplicate ports from open_ports
-open_ports=$(echo "$open_ports" | tr ' ' '\n' | sort -u | tr '\n' ' ')
+# Initialize associative array
+declare -A unique_ports
+for port in $open_ports; do
+    unique_ports["$port"]=1
+done
+
+# Convert deduped associative array back to a list
+open_ports="${!unique_ports[@]}"
+
 
 # Initialize arrays to hold PIDs
 wapiti_pids=()
