@@ -551,43 +551,52 @@ get_open_web_ports() {
     local ipv4_file="${TARGET}_web_IPv4_scan_output.txt"
     local ipv6_file="${TARGET}_web_IPv6_scan_output.txt"
     local open_ports=""
+    local retry_count=0
+    local max_retries=3
 
-    # Check and extract from the IPv4 scan output
-    if [ -f "$ipv4_file" ]; then
-        local ipv4_ports
-        ipv4_ports=$(awk '
-        /^[0-9]+\/tcp\s+open/ {  # Match lines with open TCP ports
-            if ($3 ~ /^http/) {  # Check if the service name starts with "http"
-                split($1, port_info, "/")  # Split the port information
-                print port_info[1]  # Print the port number
-            }
-        }' "$ipv4_file")
+    while [ $retry_count -lt $max_retries ]; do
+        # Check and extract from the IPv4 scan output
+        if [ -f "$ipv4_file" ]; then
+            local ipv4_ports
+            ipv4_ports=$(awk '
+            /^[0-9]+\/tcp\s+open/ {
+                if ($3 ~ /^http/) {
+                    split($1, port_info, "/")
+                    print port_info[1]
+                }
+            }' "$ipv4_file")
 
-        # Append IPv4 ports to the open_ports variable
-        open_ports+="$ipv4_ports "
-    fi
+            open_ports+="$ipv4_ports "
+        fi
 
-    # Check and extract from the IPv6 scan output if available
-    if [ -f "$ipv6_file" ]; then
-        local ipv6_ports
-        ipv6_ports=$(awk '
-        /^[0-9]+\/tcp\s+open/ {  # Match lines with open TCP ports
-            if ($3 ~ /^http/) {  # Check if the service name starts with "http"
-                split($1, port_info, "/")
-                print port_info[1]
-            }
-        }' "$ipv6_file")
+        # Check and extract from the IPv6 scan output if available
+        if [ -f "$ipv6_file" ]; then
+            local ipv6_ports
+            ipv6_ports=$(awk '
+            /^[0-9]+\/tcp\s+open/ {
+                if ($3 ~ /^http/) {
+                    split($1, port_info, "/")
+                    print port_info[1]
+                }
+            }' "$ipv6_file")
 
-        # Append IPv6 ports to the open_ports variable
-        open_ports+="$ipv6_ports "
-    fi
+            open_ports+="$ipv6_ports "
+        fi
 
-    # Remove any leading or trailing whitespace
-    open_ports=$(echo "$open_ports" | xargs)
+        open_ports=$(echo "$open_ports" | xargs)
 
-    # Handle no matching results case
-    if [ -z "$open_ports" ]; then
-        echo "No open web server ports found."
+        if [ -n "$open_ports" ]; then
+            break
+        fi
+
+        ((retry_count++))
+        echo "Retrying to detect open web ports ($retry_count/$max_retries)..."
+        run_scans "IPv4" "$TARGET"
+        wait $web_scan_pid_v4
+    done
+
+    if [ $retry_count -eq $max_retries ]; then
+        echo "Failed to detect open web ports after $max_retries attempts."
         return 1
     else
         echo "$open_ports"
