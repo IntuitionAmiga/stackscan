@@ -1,6 +1,20 @@
 #!/bin/bash
 scan_start_time=$(date +%s)
 
+readonly CLEANUP_PATTERNS=(
+    "*_scan_output.txt"
+    "*_output.txt"
+)
+
+readonly SCAN_DIR=$(mktemp -d)
+readonly TARGET_SAFE=$(printf '%q' "$TARGET")
+readonly DATE_TIME_SAFE=$(date +"%Y%m%d_%H%M%S")
+readonly LOG_FILE="${SCAN_DIR}/${TARGET_SAFE}_${DATE_TIME_SAFE}_scan.log"
+readonly HTML_REPORT_FILE="${SCAN_DIR}/${TARGET_SAFE}_${DATE_TIME_SAFE}_scan_report.html"
+
+# Add cleanup of SCAN_DIR to the exit trap
+trap 'rm -rf "$SCAN_DIR"' EXIT
+
 # Function to handle errors
 handle_error() {
     local exit_code=$?
@@ -10,8 +24,12 @@ handle_error() {
     log_message "ERROR" "Command: '${cmd}' failed with exit code ${exit_code}."
     log_message "ERROR" "Error occurred on line ${line_number}."
     echo "Cleaning up..."
-    # Delete temp files
-    rm -f ./*_output.txt
+
+    # More specific cleanup
+    for pattern in "${CLEANUP_PATTERNS[@]}"; do
+        find . -maxdepth 1 -name "$pattern" -type f -delete
+    done
+
     exit "$exit_code"
 }
 
