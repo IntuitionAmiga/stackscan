@@ -1,40 +1,141 @@
 #!/bin/bash
+if ((BASH_VERSINFO[0] < 4)); then
+    echo "Error: Bash 4.0 or higher required" >&2
+    exit 1
+fi
+
 scan_start_time=$(date +%s)
+
+readonly STACKSCAN_LOG_DIR="/var/log/stackscan"
+readonly STACKSCAN_DATA_DIR="/var/lib/stackscan"
+
+setup_directories() {
+    # Create log directory with root:root ownership and restricted permissions
+    if [ ! -d "$STACKSCAN_LOG_DIR" ]; then
+        mkdir -p "$STACKSCAN_LOG_DIR"
+        chmod 755 "$STACKSCAN_LOG_DIR"  # drwxr-xr-x
+    fi
+
+    # Create data directory that will hold the reports
+    # We make this readable by the group to allow web servers or other tools to access reports
+    if [ ! -d "$STACKSCAN_DATA_DIR" ]; then
+        mkdir -p "$STACKSCAN_DATA_DIR"
+        chmod 775 "$STACKSCAN_DATA_DIR"  # drwxrwxr-x
+        # Create a reports subdirectory
+        mkdir -p "$STACKSCAN_DATA_DIR/reports"
+        chmod 775 "$STACKSCAN_DATA_DIR/reports"
+    fi
+}
+
+setup_directories
+
+setup_secure_permissions() {
+    # Set secure umask
+    umask 077
+
+    # Ensure log directory has secure permissions
+    chmod 755 "$STACKSCAN_LOG_DIR"
+
+    # Ensure data directory has secure permissions
+    chmod 775 "$STACKSCAN_DATA_DIR"
+    chmod 775 "$STACKSCAN_DATA_DIR/reports"
+
+    # Ensure log file has secure permissions from the start
+    touch "$LOG_FILE"
+    chmod 600 "$LOG_FILE"
+
+    # Ensure HTML report file has secure permissions
+    touch "$HTML_REPORT_FILE"
+    chmod 644 "$HTML_REPORT_FILE"
+}
+
+setup_resource_limits() {
+    # Set maximum number of concurrent processes
+    local max_procs=50
+    ulimit -u "$max_procs"
+
+    # Set maximum file size (500MB)
+    ulimit -f 512000
+
+    # Check available disk space (need at least 1GB free)
+    local free_space=$(df -P "$STACKSCAN_DATA_DIR" | awk 'NR==2 {print $4}')
+    if [ "$free_space" -lt 1048576 ]; then
+        log_message "ERROR" "Insufficient disk space. Need at least 1GB free."
+        exit 1
+    fi
+}
+
+setup_resource_limits
 
 readonly CLEANUP_PATTERNS=(
     "*_scan_output.txt"
     "*_output.txt"
 )
 
-readonly SCAN_DIR=$(mktemp -d)
-readonly TARGET_SAFE=$(printf '%q' "$TARGET")
-readonly DATE_TIME_SAFE=$(date +"%Y%m%d_%H%M%S")
-readonly LOG_FILE="${SCAN_DIR}/${TARGET_SAFE}_${DATE_TIME_SAFE}_scan.log"
-readonly HTML_REPORT_FILE="${SCAN_DIR}/${TARGET_SAFE}_${DATE_TIME_SAFE}_scan_report.html"
+# Cleanup
+trap 'cleanup_handler' EXIT INT TERM
 
-# Add cleanup of SCAN_DIR to the exit trap
-trap 'rm -rf "$SCAN_DIR"' EXIT
+cleanup_handler() {
+    local exit_code=$?
+
+    # Kill all background processes
+    for pid in "${BACKGROUND_PIDS[@]}"; do
+        kill "$pid" 2>/dev/null || true
+    done
+
+    # Clean up temporary scan output files
+    rm -f "${STACKSCAN_LOG_DIR}"/*_scan_output.txt
+    rm -f "${STACKSCAN_DATA_DIR}"/*_output.txt
+
+    exit "$exit_code"
+}
 
 # Function to handle errors
 handle_error() {
     local exit_code=$?
     local cmd="${BASH_COMMAND}"
     local line_number="${BASH_LINENO[0]}"
-    log_message "ERROR" "An error occurred during the execution of the script."
-    log_message "ERROR" "Command: '${cmd}' failed with exit code ${exit_code}."
-    log_message "ERROR" "Error occurred on line ${line_number}."
-    echo "Cleaning up..."
 
-    # More specific cleanup
-    for pattern in "${CLEANUP_PATTERNS[@]}"; do
-        find . -maxdepth 1 -name "$pattern" -type f -delete
+    case $exit_code in
+        124)
+            log_message "ERROR" "Command timed out: ${cmd}"
+            ;;
+        127)
+            log_message "ERROR" "Command not found: ${cmd}"
+            ;;
+        *)
+            log_message "ERROR" "Command failed with exit code ${exit_code}: ${cmd}"
+            ;;
+    esac
+
+    # Log the stack trace
+    local i=0
+    local stack_size=${#FUNCNAME[@]}
+    log_message "ERROR" "Stack trace:"
+    while [ $i -lt $stack_size ]; do
+        log_message "ERROR" "  ${BASH_SOURCE[$i]}:${BASH_LINENO[$i]} ${FUNCNAME[$i]}"
+        i=$((i + 1))
     done
 
+    cleanup_handler
     exit "$exit_code"
 }
 
 # Automatically trap errors and call the handle_error function
 trap 'handle_error' ERR
+
+run_with_timeout() {
+    local timeout=$1
+    shift
+    print_verbose "Running command with ${timeout}s timeout: $*"
+    timeout "$timeout" "$@"
+    local exit_code=$?
+    if [ $exit_code -eq 124 ]; then
+        log_message "WARNING" "Command timed out after ${timeout} seconds: $*"
+        return 124
+    fi
+    return $exit_code
+}
 
 # ANSI color codes
 BOLD="\033[1m"
@@ -54,25 +155,23 @@ LOG_FILE=""
 log_message() {
     local level="$1"
     local message="$2"
-    local timestamp
-    timestamp=$(date +"%Y-%m-%d %H:%M:%S")
-    if [ "$level" = "ERROR" ]; then
-        echo -e "${RED}$message${RESET}"
-        if [ -n "$LOG_FILE" ]; then echo "[$timestamp] ERROR: $message" >> "$LOG_FILE"; fi
-    elif [ "$level" = "WARNING" ]; then
-        echo -e "${YELLOW}$message${RESET}"
-        if [ -n "$LOG_FILE" ]; then echo "[$timestamp] WARNING: $message" >> "$LOG_FILE"; fi
-    elif [ "$level" = "INFO" ]; then
-        if [ "$LOG_LEVEL" = "INFO" ] || [ "$LOG_LEVEL" = "VERBOSE" ]; then
-            echo -e "${GREEN}$message${RESET}"
-            if [ -n "$LOG_FILE" ]; then echo "[$timestamp] INFO: $message" >> "$LOG_FILE"; fi
-        fi
-    elif [ "$level" = "VERBOSE" ]; then
-        if [ "$LOG_LEVEL" = "VERBOSE" ]; then
-            echo -e "${CYAN}$message${RESET}"
-            if [ -n "$LOG_FILE" ]; then echo "[$timestamp] VERBOSE: $message" >> "$LOG_FILE"; fi
-        fi
+    local timestamp=$(date +"%Y-%m-%d %H:%M:%S")
+
+    # Only log VERBOSE messages if in verbose mode
+    if [ "$level" = "VERBOSE" ] && [ "$LOG_LEVEL" != "VERBOSE" ]; then
+        return
     fi
+
+    if [ -n "$LOG_FILE" ]; then
+        echo "[$timestamp] $level: $message" >> "$LOG_FILE"
+    fi
+
+    case "$level" in
+        ERROR)   echo -e "${RED}$message${RESET}" ;;
+        WARNING) [[ "$LOG_LEVEL" != "QUIET" ]] && echo -e "${YELLOW}$message${RESET}" ;;
+        INFO)    [[ "$LOG_LEVEL" =~ ^(INFO|VERBOSE)$ ]] && echo -e "${GREEN}$message${RESET}" ;;
+        VERBOSE) [[ "$LOG_LEVEL" == "VERBOSE" ]] && echo -e "${CYAN}$message${RESET}" ;;
+    esac
 }
 
 # Function to print status messages
@@ -82,7 +181,7 @@ print_status() {
 
 # Function to print verbose messages
 print_verbose() {
-    log_message "VERBOSE" "$1"
+    log_message "VERBOSE" "$1" >/dev/null 2>&1
 }
 
 # Function to print warnings
@@ -105,6 +204,14 @@ fi
 load_config() {
     local config_file="/home/$SUDO_USER/.stackscan.conf"
     if [ -f "$config_file" ]; then
+        # Check ownership and permissions
+        local owner=$(stat -c '%U' "$config_file")
+        local perms=$(stat -c '%a' "$config_file")
+
+        if [ "$owner" != "$SUDO_USER" ] || [ "$perms" != "600" ]; then
+            log_message "ERROR" "Configuration file has incorrect ownership or permissions."
+            exit 1
+        fi
         source "$config_file"
     else
         log_message "WARNING" "Configuration file not found."
@@ -187,7 +294,7 @@ DATABASE_NMAP_SCRIPT_ARGS=(
 DATABASE_PORTS="3306,5432,1433,1521,1522,1434,3050,3051"
 
 # VULN Group-specific Nmap scripts and their specific arguments
-VULN_NMAP_OPTIONS="-sS -A" # Aggressive scan with OS detection
+VULN_NMAP_OPTIONS="-sS -A -sV" # Aggressive scan with OS detection
 VULN_NMAP_SCRIPTS=(
   "vulners"
   "http-vuln*"
@@ -240,7 +347,7 @@ SQLMAP_OPTIONS="--batch --random-agent --level=3 --risk=2"
 GENERATE_HTML_REPORT="true"
 
 # Log level
-LOG_LEVEL="INFO"  # Change this to "VERBOSE" for more detailed logs
+LOG_LEVEL="VERBOSE"  # Change this to "INFO" for less chatty logs
 
 EOL
 
@@ -263,15 +370,41 @@ EOL
     fi
 }
 
+# Function to validate the target domain, IPv4, or IPv6 address
+validate_target() {
+    # Sanitize input - remove any potentially dangerous characters
+    TARGET=$(printf '%s' "$TARGET" | tr -cd 'a-zA-Z0-9.-')
+
+    # Rest of the validation logic remains the same
+    local domain_regex="^([a-zA-Z0-9](-*[a-zA-Z0-9])*\.)+[a-zA-Z]{2,}$"
+    local ipv4_regex="^([0-9]{1,3}\.){3}[0-9]{1,3}$"
+    local ipv6_regex="^(([0-9a-fA-F]{1,4}:){1,7}([0-9a-fA-F]{1,4})?|::([0-9a-fA-F]{1,4}:){0,7}([0-9a-fA-F]{1,4})?)$"
+
+    if [[ $TARGET =~ $ipv4_regex ]]; then
+        TARGET_TYPE="IPv4"
+    elif [[ $TARGET =~ $ipv6_regex ]]; then
+        TARGET_TYPE="IPv6"
+    elif [[ $TARGET =~ $domain_regex ]]; then
+        TARGET_TYPE="DOMAIN"
+    else
+        print_banner
+        print_error "Invalid target: $TARGET. Please provide a valid domain name, IPv4, or IPv6 address."
+        exit 1
+    fi
+}
+
 # Now load the configuration
 load_config
 
 TARGET="$1"
 
-# Initialize log file based on the target and current date/time
-DATE_TIME=$(date +"%Y%m%d_%H%M%S")
-LOG_FILE="${TARGET}_${DATE_TIME}_scan.log"
-HTML_REPORT_FILE="${TARGET}_${DATE_TIME}_scan_report.html"
+# Validate the target input
+validate_target "$TARGET"
+readonly TARGET_SAFE=$(printf '%q' "$TARGET")
+readonly DATE_TIME=$(date +"%Y%m%d_%H%M%S")
+readonly LOG_FILE="${STACKSCAN_LOG_DIR}/${TARGET_SAFE}_${DATE_TIME}_scan.log"
+readonly HTML_REPORT_FILE="${STACKSCAN_DATA_DIR}/reports/${TARGET_SAFE}_${DATE_TIME}_scan_report.html"
+setup_secure_permissions
 
 # Function to print the banner to console and log file
 print_banner() {
@@ -316,40 +449,12 @@ if [ "$1" == "-v" ]; then
     shift  # Remove the -v from the argument list
 fi
 
-# Function to validate the target domain, IPv4, or IPv6 address
-validate_target() {
-    # Regex for valid domain name (simple check)
-    local domain_regex="^([a-zA-Z0-9](-*[a-zA-Z0-9])*\.)+[a-zA-Z]{2,}$"
-
-    # Regex for valid IPv4 address
-    local ipv4_regex="^([0-9]{1,3}\.){3}[0-9]{1,3}$"
-
-    # Regex for valid IPv6 address (including shorter notations)
-    local ipv6_regex="^(([0-9a-fA-F]{1,4}:){1,7}([0-9a-fA-F]{1,4})?|::([0-9a-fA-F]{1,4}:){0,7}([0-9a-fA-F]{1,4})?)$"
-
-    # Check if the target is a valid IPv4 address
-    if [[ $TARGET =~ $ipv4_regex ]]; then
-        TARGET_TYPE="IPv4"
-    # Check if the target is a valid IPv6 address
-    elif [[ $TARGET =~ $ipv6_regex ]]; then
-        TARGET_TYPE="IPv6"
-    # Check if the target is a valid domain name
-    elif [[ $TARGET =~ $domain_regex ]]; then
-        TARGET_TYPE="DOMAIN"
-    else
-        print_banner
-        print_error "Invalid target: $TARGET. Please provide a valid domain name, IPv4, or IPv6 address."
-        exit 1
-    fi
-}
-
-
 # Validate the target input
 validate_target "$TARGET"
 
 # Check required commands
 check_required_commands() {
-    local cmds=("nmap" "dig" "ping6" "jq" "curl" "nikto" "wapiti")
+    local cmds=("nmap" "dig" "ping6" "jq" "curl" "nikto" "wapiti" "wpscan" "sqlmap")
     for cmd in "${cmds[@]}"; do
         if ! command -v "$cmd" &> /dev/null; then
             print_error "$cmd could not be found. Please install it and try again."
@@ -522,7 +627,7 @@ run_scan_group() {
 
             # Execute the Nmap command and append the command and its output to the output file
             echo "Executing Nmap Command: $individual_nmap_command" >> "$output_file"
-            eval $individual_nmap_command >> "$output_file" 2>&1
+            eval run_with_timeout 3600 $individual_nmap_command >> "$output_file" 2>&1
 
             # Add a dividing line after each command's output
             echo " " >> "$output_file"
@@ -530,39 +635,41 @@ run_scan_group() {
             echo " " >> "$output_file"
 
             (spinner "Nmap $group_name scan - Script: $expanded_script") &
-            print_verbose "Nmap command executed for $group_name ($ip_version), Script: $expanded_script: $individual_nmap_command" >/dev/null 2>&1
+            print_verbose "Nmap command executed for $group_name ($ip_version), Script: $expanded_script: $individual_nmap_command"
         done
 
     done
     print_status "$(date '+[%Y-%m-%d %H:%M:%S]') Nmap $group_name scan on $target_ip ($ip_version) completed."
-    print_verbose "$(date '+[%Y-%m-%d %H:%M:%S]') Nmap $group_name scan on $target_ip ($ip_version) completed." >>/dev/null 2>&1
+    print_verbose "$(date '+[%Y-%m-%d %H:%M:%S]') Nmap $group_name scan on $target_ip ($ip_version) completed."
 }
 # Function to execute scans in parallel for IPv4 and IPv6
 run_scans() {
-    local ip_version="$1"
-    local target_ip="$2"
+   local ip_version="$1"
+   local target_ip="$2"
 
-    # Run predefined scan groups and capture the PID for the web scan group
-    run_scan_group "web" WEB_NMAP_SCRIPTS[@] WEB_NMAP_SCRIPT_ARGS[@] "$WEB_PORTS" "$ip_version" "$target_ip" &
-    web_scan_pid=$!
+   # Run web scan and capture PID
+   run_scan_group "web" WEB_NMAP_SCRIPTS[@] WEB_NMAP_SCRIPT_ARGS[@] "$WEB_PORTS" "$ip_version" "$target_ip" &
+   web_scan_pid=$!
 
-    # Run other scan groups in the background (no need to capture these PIDs for now)
-    run_scan_group "auth" AUTH_NMAP_SCRIPTS[@] AUTH_NMAP_SCRIPT_ARGS[@] "$AUTH_PORTS" "$ip_version" "$target_ip" &
+   # Run auth scan
+   run_scan_group "auth" AUTH_NMAP_SCRIPTS[@] AUTH_NMAP_SCRIPT_ARGS[@] "$AUTH_PORTS" "$ip_version" "$target_ip" &
 
-    run_scan_group "database" DATABASE_NMAP_SCRIPTS[@] DATABASE_NMAP_SCRIPT_ARGS[@] "$DATABASE_PORTS" "$ip_version" "$target_ip" &
-    database_scan_pid=$!
+   # Run database scan and capture PID
+   run_scan_group "database" DATABASE_NMAP_SCRIPTS[@] DATABASE_NMAP_SCRIPT_ARGS[@] "$DATABASE_PORTS" "$ip_version" "$target_ip" &
+   database_scan_pid=$!
 
-    run_scan_group "common" COMMON_NMAP_SCRIPTS[@] COMMON_NMAP_SCRIPT_ARGS[@] "$COMMON_PORTS" "$ip_version" "$target_ip" &
-    run_scan_group "vuln" VULN_NMAP_SCRIPTS[@] VULN_NMAP_SCRIPT_ARGS[@] "$VULN_PORTS" "$ip_version" "$target_ip" &
+   # Run remaining scans
+   run_scan_group "common" COMMON_NMAP_SCRIPTS[@] COMMON_NMAP_SCRIPT_ARGS[@] "$COMMON_PORTS" "$ip_version" "$target_ip" &
+   run_scan_group "vuln" VULN_NMAP_SCRIPTS[@] VULN_NMAP_SCRIPT_ARGS[@] "$VULN_PORTS" "$ip_version" "$target_ip" &
 
-    # Run the custom group if defined
-    if [ -n "${CUSTOM_NMAP_SCRIPTS[0]}" ]; then
-        if ! nmap --script-help="${CUSTOM_NMAP_SCRIPTS[0]}" > /dev/null 2>&1; then
-            print_warning "Custom scripts not found or invalid: ${CUSTOM_NMAP_SCRIPTS[0]}"
-        else
-            run_scan_group "custom" CUSTOM_NMAP_SCRIPTS[@] CUSTOM_NMAP_SCRIPT_ARGS[@] "$CUSTOM_PORTS" "$ip_version" "$target_ip" &
-        fi
-    fi
+   # Run custom group if defined
+   if [ -n "${CUSTOM_NMAP_SCRIPTS[0]}" ]; then
+       if ! nmap --script-help="${CUSTOM_NMAP_SCRIPTS[0]}" > /dev/null 2>&1; then
+           print_warning "Custom scripts not found or invalid: ${CUSTOM_NMAP_SCRIPTS[0]}"
+       else
+           run_scan_group "custom" CUSTOM_NMAP_SCRIPTS[@] CUSTOM_NMAP_SCRIPT_ARGS[@] "$CUSTOM_PORTS" "$ip_version" "$target_ip" &
+       fi
+   fi
 }
 # Extract any open web server ports and scan them with Wapiti, Nikto, WPScan and SQLMap
 get_open_web_ports() {
@@ -643,11 +750,11 @@ run_wapiti_scan() {
         fi
 
         print_status "$(date '+[%Y-%m-%d %H:%M:%S]') Starting Wapiti scan on $target_ip:$port..."
-        local output_file="${target_ip}_${port}_wapiti_output.txt"
+        local output_file="${SCAN_DIR}/${target_ip}_${port}_wapiti_output.txt"
         # Log the exact Wapiti command being executed
-        print_verbose "Executing Wapiti command: wapiti -u \"$url\" $WAPITI_OPTIONS -f txt -o \"$output_file\"" >>/dev/null 2>&1
+        print_verbose "Executing Wapiti command: wapiti -u \"$url\" $WAPITI_OPTIONS -f txt -o \"$output_file\""
 
-        (wapiti -u "$url" $WAPITI_OPTIONS -f txt -o "$output_file" > "${output_file}_log.txt" 2>&1) &
+        (run_with_timeout 3600 wapiti -u "$url" $WAPITI_OPTIONS -f txt -o "$output_file" > "${output_file}_log.txt" 2>&1) &
 
         wapiti_pid=$!  # Capture the PID of the Wapiti process
         wapiti_pids+=($wapiti_pid)
@@ -680,7 +787,7 @@ run_wapiti_scan() {
     echo "$wapiti_scan_count" > /tmp/wapiti_scan_count.txt
 
     print_status "$(date '+[%Y-%m-%d %H:%M:%S]') Wapiti scan on $target_ip:$port completed."
-    print_verbose "$(date '+[%Y-%m-%d %H:%M:%S]') Wapiti scan on $target_ip:$port completed." >>/dev/null 2>&1
+    print_verbose "$(date '+[%Y-%m-%d %H:%M:%S]') Wapiti scan on $target_ip:$port completed."
 }
 run_nikto_scan() {
     local target_ip="$1"
@@ -704,10 +811,10 @@ run_nikto_scan() {
         local output_file="${target_ip}_${port}_nikto_output.txt"
 
         # Log the exact Nikto command being executed
-        print_verbose "Nikto command executed for $target_ip:$port: nikto -h $target_ip -p $port $NIKTO_OPTIONS -output ${output_file}" >/dev/null 2>&1
+        print_verbose "Nikto command executed for $target_ip:$port: nikto -h $target_ip -p $port $NIKTO_OPTIONS -output ${output_file}"
 
         # Run Nikto in the background and immediately capture the PID
-        (nikto -h "$target_ip" -p "$port" $NIKTO_OPTIONS -output "$output_file" > "${output_file}_log.txt" 2>&1) &
+        (run_with_timeout 3600 nikto -h "$target_ip" -p "$port" $NIKTO_OPTIONS -output "$output_file" > "${output_file}_log.txt" 2>&1) &
 
         # Add dividing line after each scan's output
         echo " " >> "$output_file"
@@ -729,7 +836,7 @@ run_nikto_scan() {
         wait $nikto_pid || true
         kill $spinner_pid 2>/dev/null
 
-        print_verbose "Nikto command executed for $target_ip:$port: nikto -h $target_ip -p $port $NIKTO_OPTIONS -output ${target_ip}_${port}_nikto_output.txt" >/dev/null 2>&1
+        print_verbose "Nikto command executed for $target_ip:$port: nikto -h $target_ip -p $port $NIKTO_OPTIONS -output ${target_ip}_${port}_nikto_output.txt"
     done
 
     # Wait for all Nikto processes to complete
@@ -741,7 +848,7 @@ run_nikto_scan() {
     echo "$nikto_scan_count" > /tmp/nikto_scan_count.txt
 
     print_status "$(date '+[%Y-%m-%d %H:%M:%S]') Nikto scan on $target_ip:$port completed."
-    print_verbose "$(date '+[%Y-%m-%d %H:%M:%S]') Nikto scan on $target_ip:$port completed." >>/dev/null 2>&1
+    print_verbose "$(date '+[%Y-%m-%d %H:%M:%S]') Nikto scan on $target_ip:$port completed."
 }
 run_wpscan_scan() {
     local target_ip="$1"
@@ -766,9 +873,9 @@ run_wpscan_scan() {
         local output_file="${target_ip}_${port}_wpscan_output.txt"
 
         # Log the exact WPScan command being executed
-        print_verbose "WPScan command executed for $url: wpscan $WPSCAN_OPTIONS --url $url > $output_file" >/dev/null 2>&1
+        print_verbose "WPScan command executed for $url: wpscan $WPSCAN_OPTIONS --url $url > $output_file"
 
-        (sudo -u "$SUDO_USER" wpscan $WPSCAN_OPTIONS --url "$url" > "$output_file" 2>&1) &
+        (run_with_timeout 3600 sudo -u "$SUDO_USER" wpscan $WPSCAN_OPTIONS --url "$url" > "$output_file" 2>&1) &
         wpscan_pid=$!  # Capture the PID of the WPScan process
         wpscan_pids+=($wpscan_pid)
 
@@ -800,7 +907,7 @@ run_wpscan_scan() {
     echo "$wpscan_scan_count" > /tmp/wpscan_scan_count.txt
 
     print_status "$(date '+[%Y-%m-%d %H:%M:%S]') WPScan scan on $target_ip:$port completed."
-    print_verbose "$(date '+[%Y-%m-%d %H:%M:%S]') WPScan scan on $target_ip:$port completed." >>/dev/null 2>&1
+    print_verbose "$(date '+[%Y-%m-%d %H:%M:%S]') WPScan scan on $target_ip:$port completed."
 }
 run_sqlmap_scan() {
     local target_ip="$1"
@@ -825,9 +932,9 @@ run_sqlmap_scan() {
         local output_file="${target_ip}_${port}_sqlmap_output.txt"
 
         # Log the exact SQLmap command being executed
-        print_verbose "SQLMap command executed for $url: sqlmap $SQLMAP_OPTIONS -u \"$url\" > $output_file" >/dev/null 2>&1
+        print_verbose "SQLMap command executed for $url: sqlmap $SQLMAP_OPTIONS -u \"$url\" > $output_file"
 
-        (sudo -u "$SUDO_USER" sqlmap $SQLMAP_OPTIONS -u "$url" > "$output_file" 2>&1) &
+        (run_with_timeout 3600 sudo -u "$SUDO_USER" sqlmap $SQLMAP_OPTIONS -u "$url" > "$output_file" 2>&1) &
         sqlmap_pid=$!  # Capture the PID of the SQLMap process
         sqlmap_pids+=($sqlmap_pid)
 
@@ -859,7 +966,7 @@ run_sqlmap_scan() {
     echo "$sqlmap_scan_count" > /tmp/sqlmap_scan_count.txt
 
     print_status "$(date '+[%Y-%m-%d %H:%M:%S]') SQLMap scan on $target_ip:$port completed."
-    print_verbose "$(date '+[%Y-%m-%d %H:%M:%S]') SQLMap scan on $target_ip:$port completed." >>/dev/null 2>&1
+    print_verbose "$(date '+[%Y-%m-%d %H:%M:%S]') SQLMap scan on $target_ip:$port completed."
 }
 # Function to detect WordPress and SQL databases in both IPv4 and IPv6 outputs
 detect_services() {
@@ -902,15 +1009,13 @@ database_scan_pid_v4=$database_scan_pid
 
 # Run for IPv6 only if supported and the target is not an IPv4 address, capture the web scan PID
 if [ "$IPV6_SUPPORTED" = true ] && [ "$TARGET_TYPE" != "IPv4" ]; then
-    run_scans "IPv6" "$TARGET"
-    web_scan_pid_v6=$web_scan_pid
+   run_scans "IPv6" "$TARGET"
+   web_scan_pid_v6=$web_scan_pid
 fi
 
 # Wait for the web-related Nmap scans to finish so that we can extract the web server port numbers
-wait $web_scan_pid_v4
-if [ -n "$web_scan_pid_v6" ]; then
-    wait $web_scan_pid_v6
-fi
+wait $web_scan_pid_v4 || true
+[ -n "$web_scan_pid_v6" ] && wait $web_scan_pid_v6 || true
 
 # Extract any open web server ports and scan them with Wapiti and Nikto
 # Initialize associative array
@@ -987,69 +1092,128 @@ done
 wait $nmap_pid
 
 # Merge results
-FINAL_OUTPUT_FILE="${TARGET}_${DATE_TIME}_final_scan_output.txt"
+readonly FINAL_OUTPUT_FILE="${SCAN_DIR}/${TARGET}_${DATE_TIME}_final_scan_output.txt"
+output_file="${SCAN_DIR}/${target_ip}_${group_name}_${ip_version}_scan_output.txt"
 cat ./*_scan_output.txt > "$FINAL_OUTPUT_FILE"
 
 # Print final status messages
 print_status "$(date '+[%Y-%m-%d %H:%M:%S]') Scanning complete for $TARGET."
 log_message "INFO" "$(date '+[%Y-%m-%d %H:%M:%S]') Log saved to: $LOG_FILE"
 
-# Function to generate an HTML report with advanced features
-function lookup_cve_details() {
-    local cve_id="$1"
-    local nvd_api_url="https://services.nvd.nist.gov/rest/json/cve/1.0/$cve_id"
+readonly API_CALLS_FILE="/tmp/stackscan_api_calls"
+readonly API_RATE_LIMIT=30
 
-    # Fetch CVE details from NVD
-    local cve_details
-    cve_details=$(curl -s "$nvd_api_url" | jq '.result.CVE_Items[0].cve')
+check_rate_limit() {
+    local current_time=$(date +%s)
+    local minute_ago=$((current_time - 60))
 
-    # Check if we got a valid response
-    if [[ -z "$cve_details" || "$cve_details" == "null" ]]; then
-        print_warning "CVE details for $cve_id could not be retrieved."
-        echo "N/A,N/A"
-        return
+    touch "$API_CALLS_FILE"
+    sed -i "/$minute_ago/d" "$API_CALLS_FILE"
+    local recent_calls=$(wc -l < "$API_CALLS_FILE")
+
+    if [ "$recent_calls" -ge "$API_RATE_LIMIT" ]; then
+        return 1
     fi
 
-    # Extract relevant information from the JSON response
-    local cve_description
-    cve_description=$(echo "$cve_details" | jq -r '.description.description_data[0].value')
-    #local cve_published_date
-    #cve_published_date=$(echo "$cve_details" | jq -r '.publishedDate')
-    local cve_impact_score
-    cve_impact_score=$(echo "$cve_details" | jq -r '.impact.baseMetricV2.cvssV2.baseScore // "N/A"')
-
-    # Return severity and CVSS score
-    echo "$cve_description,$cve_impact_score"
+    echo "$current_time" >> "$API_CALLS_FILE"
+    return 0
 }
 
-# Function to lookup CVEs based on service version
+# Function to generate an HTML report with advanced features
+lookup_cve_details() {
+   local cve_id="$1"
+   print_verbose "Looking up CVE details for $cve_id"
+
+   # Check rate limit before making API call
+   if ! check_rate_limit; then
+       print_verbose "Rate limit hit, waiting 2s before retry"
+       sleep 2
+       if ! check_rate_limit; then
+           print_warning "Rate limit exceeded for NVD API"
+           echo "N/A,N/A" # Return placeholder values
+           return 1
+       fi
+   fi
+
+   local nvd_api_url="https://services.nvd.nist.gov/rest/json/cves/2.0/$cve_id"
+   print_verbose "Making API request to: $nvd_api_url"
+
+   # Make API request with timeout and user agent
+   local cve_details
+   cve_details=$(run_with_timeout 10 curl -s \
+       -H "User-Agent: Stackscan/0.1" \
+       -H "Accept: application/json" \
+       "$nvd_api_url" | jq '.result.CVE_Items[0].cve')
+
+   # Validate response
+   if [[ -z "$cve_details" || "$cve_details" == "null" ]]; then
+       print_warning "CVE details for $cve_id could not be retrieved."
+       print_verbose "Empty or invalid response received from NVD API"
+       echo "N/A,N/A"
+       return 1
+   fi
+
+   # Extract details with error handling
+   local cve_description
+   local cve_impact_score
+
+   cve_description=$(echo "$cve_details" | jq -r '.description.description_data[0].value // "N/A"')
+   cve_impact_score=$(echo "$cve_details" | jq -r '.impact.baseMetricV2.cvssV2.baseScore // "N/A"')
+
+   print_verbose "Retrieved CVE $cve_id: Score=$cve_impact_score Description=$cve_description"
+
+   # Return description and score
+   echo "$cve_description,$cve_impact_score"
+   return 0
+}
+
 lookup_cve_by_service_version() {
-    local service_name="$1"
-    local version="$2"
-    local nvd_api_url="https://services.nvd.nist.gov/rest/json/cves/1.0?keyword=$service_name+$version"
+   local service_name="$1"
+   local version="$2"
+   print_verbose "Looking up CVEs for $service_name version $version"
 
-    # Fetch CVE details from NVD with proper headers
-    local cve_details
-    cve_details=$(curl -s -H "User-Agent: Stackscan/0.1" "$nvd_api_url")
+   # Check rate limit before making API call
+   if ! check_rate_limit; then
+       print_verbose "Rate limit hit, waiting 2s before retry"
+       sleep 2
+       if ! check_rate_limit; then
+           print_warning "Rate limit exceeded for NVD API"
+           return 1
+       fi
+   fi
 
-    # Debugging: Print the raw API response
-    echo "API Response for $service_name $version: $cve_details" >> "$LOG_FILE"
+   local nvd_api_url="https://services.nvd.nist.gov/rest/json/cves/1.0?keyword=$service_name+$version"
+   print_verbose "Making API request to: $nvd_api_url"
 
-    # Check if the response is valid JSON
-    if ! echo "$cve_details" | jq empty; then
-        print_warning "Invalid JSON received from NVD API for $service_name $version."
-        return
-    fi
+   # Fetch CVE details
+   local cve_details
+   cve_details=$(run_with_timeout 10 curl -s \
+       -H "User-Agent: Stackscan/0.1" \
+       -H "Accept: application/json" \
+       "$nvd_api_url")
 
-    # Parse the CVE details from the response
-    local cve_list
-    cve_list=$(echo "$cve_details" | jq -r '.result.CVE_Items[] | .cve.CVE_data_meta.ID + " - " + .cve.description.description_data[0].value + " (CVSS Score: " + (.impact.baseMetricV2.cvssV2.baseScore | tostring) + ")"')
+   # Debugging output
+   print_verbose "API Response: $cve_details"
+   echo "API Response for $service_name $version: $cve_details" >> "$LOG_FILE"
 
-    if [ -z "$cve_list" ]; then
-        echo "No CVEs found for $service_name $version."
-    else
-        echo "$cve_list"
-    fi
+   # Validate JSON response
+   if ! echo "$cve_details" | jq empty; then
+       print_warning "Invalid JSON received from NVD API for $service_name $version."
+       print_verbose "Failed to parse API response as JSON"
+       return 1
+   fi
+
+   # Parse CVE details
+   local cve_list
+   cve_list=$(echo "$cve_details" | jq -r '.result.CVE_Items[] | .cve.CVE_data_meta.ID + " - " + .cve.description.description_data[0].value + " (CVSS Score: " + (.impact.baseMetricV2.cvssV2.baseScore | tostring) + ")"')
+
+   if [ -z "$cve_list" ]; then
+       print_verbose "No CVEs found for $service_name $version"
+       echo "No CVEs found for $service_name $version."
+   else
+       print_verbose "Found CVEs for $service_name $version:\n$cve_list"
+       echo "$cve_list"
+   fi
 }
 
 generate_html_report() {
@@ -1290,7 +1454,7 @@ rm -f ./*_output.txt &
 # Open the HTML report in the default browser as the non-root user
 # We have to do this because KDE 6.1 borked xdg-open
 if [ "$GENERATE_HTML_REPORT" = "true" ]; then
-        sudo -u "$SUDO_USER" x-www-browser "$HTML_REPORT_FILE" > /dev/null 2>&1 &
+        run_with_timeout 3600 sudo -u "$SUDO_USER" x-www-browser "$HTML_REPORT_FILE" & > /dev/null 2>&1 &
 fi
 
 exit 0
