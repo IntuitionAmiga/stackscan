@@ -443,12 +443,6 @@ if [ -z "$1" ]; then
   exit 1
 fi
 
-# Check for verbose flag
-if [ "$1" == "-v" ]; then
-    LOG_LEVEL="VERBOSE"
-    shift  # Remove the -v from the argument list
-fi
-
 # Validate the target input
 validate_target "$TARGET"
 
