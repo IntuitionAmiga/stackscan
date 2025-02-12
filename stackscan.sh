@@ -8,6 +8,7 @@ scan_start_time=$(date +%s)
 
 readonly STACKSCAN_LOG_DIR="/var/log/stackscan"
 readonly STACKSCAN_DATA_DIR="/var/lib/stackscan"
+readonly STACKSCAN_TMP_DIR="/tmp/stackscan"
 
 setup_directories() {
     # Create log directory with root:root ownership and restricted permissions
@@ -25,6 +26,7 @@ setup_directories() {
         mkdir -p "$STACKSCAN_DATA_DIR/reports"
         chmod 775 "$STACKSCAN_DATA_DIR/reports"
     fi
+    mkdir -p "$STACKSCAN_TMP_DIR" && chmod 700 "$STACKSCAN_TMP_DIR"
 }
 
 setup_directories
@@ -122,7 +124,8 @@ handle_error() {
 }
 
 # Automatically trap errors and call the handle_error function
-trap 'handle_error' ERR
+trap 'handle_error ${BASH_SOURCE[0]} ${LINENO} ${FUNCNAME[0]:-main} $?' ERR
+trap 'kill -TERM $$ 2>/dev/null' INT TERM
 
 run_with_timeout() {
     local timeout=$1
@@ -155,7 +158,8 @@ LOG_FILE=""
 log_message() {
     local level="$1"
     local message="$2"
-    local timestamp=$(date +"%Y-%m-%d %H:%M:%S")
+    local timestamp
+    timestamp=$(date +"%Y-%m-%d %H:%M:%S")
 
     # Only log VERBOSE messages if in verbose mode
     if [ "$level" = "VERBOSE" ] && [ "$LOG_LEVEL" != "VERBOSE" ]; then
@@ -212,7 +216,10 @@ load_config() {
             log_message "ERROR" "Configuration file has incorrect ownership or permissions."
             exit 1
         fi
-        source "$config_file"
+        if ! source "$config_file"; then
+            print_error "Failed to source config: $config_file"
+            return 1
+        fi
     else
         log_message "WARNING" "Configuration file not found."
         create_default_config
@@ -539,7 +546,7 @@ expand_wildcard_scripts() {
     local expanded_scripts=()
 
     # Expand wildcard pattern to actual script names
-    expanded_scripts=($(find /usr/share/nmap/scripts/ -name "${script_pattern}.nse" -exec basename {} .nse \;))
+    readarray -t expanded_scripts < <(find /usr/share/nmap/scripts/ -name "${script_pattern}.nse" -exec basename {} .nse \;)
 
     # Return the expanded script names as an array
     echo "${expanded_scripts[@]}"
@@ -673,7 +680,7 @@ get_open_web_ports() {
     local retry_count=0
     local max_retries=3
 
-    while [ $retry_count -lt $max_retries ]; do
+    while [ "$retry_count" -lt "$max_retries" ]; do
         # Check and extract from the IPv4 scan output
         if [ -f "$ipv4_file" ]; then
             local ipv4_ports
@@ -711,7 +718,7 @@ get_open_web_ports() {
         ((retry_count++))
         echo "Retrying to detect open web ports ($retry_count/$max_retries)..."
         run_scans "IPv4" "$TARGET"
-        wait $web_scan_pid_v4
+        wait "$web_scan_pid_v4"
     done
 
     if [ $retry_count -eq $max_retries ]; then
@@ -751,7 +758,7 @@ run_wapiti_scan() {
         (run_with_timeout 3600 wapiti -u "$url" $WAPITI_OPTIONS -f txt -o "$output_file" > "${output_file}_log.txt" 2>&1) &
 
         wapiti_pid=$!  # Capture the PID of the Wapiti process
-        wapiti_pids+=($wapiti_pid)
+        wapiti_pids+=("$wapiti_pid")
 
         wapiti_scanned_ports[$port]=1  # Mark this port as scanned
 
@@ -763,7 +770,7 @@ run_wapiti_scan() {
         spinner_pid=$!
 
         # Wait for Wapiti to complete and kill the spinner
-        wait $wapiti_pid || true
+        wait "$wapiti_pid" || true
         kill $spinner_pid 2>/dev/null
     done
 
@@ -811,11 +818,13 @@ run_nikto_scan() {
         (run_with_timeout 3600 nikto -h "$target_ip" -p "$port" $NIKTO_OPTIONS -output "$output_file" > "${output_file}_log.txt" 2>&1) &
 
         # Add dividing line after each scan's output
-        echo " " >> "$output_file"
-        echo "------------------------------------------------------------------" >> "$output_file"
-        echo " " >> "$output_file"
+        {
+            echo " "
+            echo "------------------------------------------------------------------"
+            echo " "
+        } >> "$output_file"
         local nikto_pid=$!  # Store the PID for this particular Nikto process
-        nikto_pids+=($nikto_pid)  # Append the PID to the array
+        nikto_pids+=("$nikto_pid")  # Append the PID to the array
 
         nikto_scanned_ports[$port]=1  # Mark this port as scanned
 
@@ -827,7 +836,7 @@ run_nikto_scan() {
         local spinner_pid=$!
 
         # Wait for Nikto to complete and kill the spinner
-        wait $nikto_pid || true
+        wait "$nikto_pid" || true
         kill $spinner_pid 2>/dev/null
 
         print_verbose "Nikto command executed for $target_ip:$port: nikto -h $target_ip -p $port $NIKTO_OPTIONS -output ${target_ip}_${port}_nikto_output.txt"
@@ -871,7 +880,7 @@ run_wpscan_scan() {
 
         (run_with_timeout 3600 sudo -u "$SUDO_USER" wpscan $WPSCAN_OPTIONS --url "$url" > "$output_file" 2>&1) &
         wpscan_pid=$!  # Capture the PID of the WPScan process
-        wpscan_pids+=($wpscan_pid)
+        wpscan_pids+=("$wpscan_pid")
 
         wpscan_scanned_ports[$port]=1  # Mark this port as scanned
 
@@ -883,7 +892,7 @@ run_wpscan_scan() {
         spinner_pid=$!
 
         # Wait for WPScan to complete and kill the spinner
-        wait $wpscan_pid || true
+        wait "$wpscan_pid" || true
         kill $spinner_pid 2>/dev/null
 
         # Add dividing line after each scan's output
@@ -930,7 +939,7 @@ run_sqlmap_scan() {
 
         (run_with_timeout 3600 sudo -u "$SUDO_USER" sqlmap $SQLMAP_OPTIONS -u "$url" > "$output_file" 2>&1) &
         sqlmap_pid=$!  # Capture the PID of the SQLMap process
-        sqlmap_pids+=($sqlmap_pid)
+        sqlmap_pids+=("$sqlmap_pid")
 
         sqlmap_scanned_ports[$port]=1  # Mark this port as scanned
 
@@ -942,7 +951,7 @@ run_sqlmap_scan() {
         spinner_pid=$!
 
         # Wait for SQLMap to complete and kill the spinner
-        wait $sqlmap_pid || true
+        wait "$sqlmap_pid" || true
         kill $spinner_pid 2>/dev/null
 
         # Add dividing line after each scan's output
@@ -1008,8 +1017,8 @@ if [ "$IPV6_SUPPORTED" = true ] && [ "$TARGET_TYPE" != "IPv4" ]; then
 fi
 
 # Wait for the web-related Nmap scans to finish so that we can extract the web server port numbers
-wait $web_scan_pid_v4 || true
-[ -n "$web_scan_pid_v6" ] && wait $web_scan_pid_v6 || true
+wait "$web_scan_pid_v4" || true
+[ -n "$web_scan_pid_v6" ] && wait "$web_scan_pid_v6" || true
 
 # Extract any open web server ports and scan them with Wapiti and Nikto
 # Initialize associative array
@@ -1019,8 +1028,7 @@ for port in $open_ports; do
 done
 
 # Convert deduped associative array back to a list
-open_ports="${!unique_ports[@]}"
-
+mapfile -t open_ports < <(printf '%s\n' "${!unique_ports[@]}")
 
 # Initialize arrays to hold PIDs
 wapiti_pids=()
@@ -1031,17 +1039,17 @@ sqlmap_pids=()
 # If no open ports found, skip all scans
 if [ -n "$open_ports" ]; then
     # Run Wapiti scans in parallel
-    run_wapiti_scan "$TARGET" $open_ports &
+    run_wapiti_scan "$TARGET" "${open_ports[@]}" &
     wapiti_pids+=($!)  # Append the PID of the Wapiti process to the array
 
     # Run Nikto scans in parallel
-    run_nikto_scan "$TARGET" $open_ports &
+    run_nikto_scan "$TARGET" "${open_ports[@]}" &
     nikto_pids+=($!)  # Append the PID of the Nikto process to the array
 
     # Wait for the database-related Nmap scans to finish
-    wait $database_scan_pid_v4
+    wait "$database_scan_pid_v4"
     if [ -n "$database_scan_pid_v6" ]; then
-        wait $database_scan_pid_v6
+        wait "$database_scan_pid_v6"
     fi
 
     # Detect services after database scan
@@ -1051,13 +1059,13 @@ if [ -n "$open_ports" ]; then
 
     # Run WPScan only if WordPress was detected
     if [ "$wp_detected" = "true" ]; then
-        run_wpscan_scan "$TARGET" $open_ports &
+        run_wpscan_scan "$TARGET" "${open_ports[@]}" &
         wpscan_pids+=($!)  # Append the PID of the WPScan process to the array
     fi
 
     # Run SQLMap only if an SQL database was detected
     if [ "$sql_detected" = true ]; then
-        run_sqlmap_scan "$TARGET" $open_ports &
+        run_sqlmap_scan "$TARGET" "${open_ports[@]}" &
         sqlmap_pids+=($!)  # Append the PID of the SQLMap process to the array
     fi
 fi
@@ -1276,7 +1284,7 @@ generate_html_report() {
     wapiti_found=false
 
     # Iterate over Wapiti result files for each scanned port
-    for wapiti_file in ${TARGET}_*_wapiti_output.txt; do
+    for wapiti_file in "${TARGET}"_*_wapiti_output.txt; do
         if [ -f "$wapiti_file" ] && [ -s "$wapiti_file" ]; then
             cat "$wapiti_file" >> "$HTML_REPORT_FILE"
             echo -e "\n" >> "$HTML_REPORT_FILE"  # Add a newline between results for readability
@@ -1435,15 +1443,17 @@ if [ -n "$SUDO_USER" ]; then
 fi
 
 #wait for any background jobs to finish
-(spinner "Waiting for background jobs to finish...") &
-wait
+exec {fd}< <(spinner "Waiting for background jobs to finish...")
+wait "$!"
+exec {fd}<&-
 sync &
 
 # Print total scan duration
 log_message "INFO" "$(date '+[%Y-%m-%d %H:%M:%S]') Total execution time: $formatted_scan_duration"
 
 # Clean up the temporary files
-rm -f ./*_output.txt &
+trap 'rm -f -- "${temp_files[@]}"' EXIT
+temp_files+=("${TARGET}_${port}_output.txt")
 
 # Open the HTML report in the default browser as the non-root user
 # We have to do this because KDE 6.1 borked xdg-open
