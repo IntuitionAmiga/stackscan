@@ -4,11 +4,18 @@ if ((BASH_VERSINFO[0] < 4)); then
     exit 1
 fi
 
+# Ensure the script is run as root (check this early, before any directory operations)
+if [ "$EUID" -ne 0 ]; then
+    echo -e "\033[31mError: This script must be run as root.\033[0m" >&2
+    exit 1
+fi
+
 scan_start_time=$(date +%s)
 
 readonly STACKSCAN_LOG_DIR="/var/log/stackscan"
 readonly STACKSCAN_DATA_DIR="/var/lib/stackscan"
 readonly STACKSCAN_TMP_DIR="/tmp/stackscan"
+readonly SCAN_DIR="."
 
 setup_directories() {
     # Create log directory with root:root ownership and restricted permissions
@@ -52,8 +59,9 @@ setup_secure_permissions() {
 }
 
 setup_resource_limits() {
-    # Set maximum number of concurrent processes
-    local max_procs=50
+    # Set maximum number of concurrent processes (increased from 50 to avoid fork issues)
+    # Note: This limit applies only to child processes spawned by this script
+    local max_procs=1000
     ulimit -u "$max_procs"
 
     # Set maximum file size (500MB)
@@ -197,12 +205,6 @@ print_warning() {
 print_error() {
     log_message "ERROR" "$1"
 }
-
-# Ensure the script is run as root
-if [ "$EUID" -ne 0 ]; then
-    log_message "ERROR" "This script must be run as root."
-    exit 1
-fi
 
 # Load the configuration file early in the script
 load_config() {
@@ -1021,14 +1023,16 @@ wait "$web_scan_pid_v4" || true
 [ -n "$web_scan_pid_v6" ] && wait "$web_scan_pid_v6" || true
 
 # Extract any open web server ports and scan them with Wapiti and Nikto
+open_ports=$(get_open_web_ports)
+
 # Initialize associative array
 declare -A unique_ports
 for port in $open_ports; do
     unique_ports["$port"]=1
 done
 
-# Convert deduped associative array back to a list
-mapfile -t open_ports < <(printf '%s\n' "${!unique_ports[@]}")
+# Convert deduped associative array back to a string list
+open_ports="${!unique_ports[@]}"
 
 # Initialize arrays to hold PIDs
 wapiti_pids=()
@@ -1039,11 +1043,11 @@ sqlmap_pids=()
 # If no open ports found, skip all scans
 if [ -n "$open_ports" ]; then
     # Run Wapiti scans in parallel
-    run_wapiti_scan "$TARGET" "${open_ports[@]}" &
+    run_wapiti_scan "$TARGET" $open_ports &
     wapiti_pids+=($!)  # Append the PID of the Wapiti process to the array
 
     # Run Nikto scans in parallel
-    run_nikto_scan "$TARGET" "${open_ports[@]}" &
+    run_nikto_scan "$TARGET" $open_ports &
     nikto_pids+=($!)  # Append the PID of the Nikto process to the array
 
     # Wait for the database-related Nmap scans to finish
@@ -1059,13 +1063,13 @@ if [ -n "$open_ports" ]; then
 
     # Run WPScan only if WordPress was detected
     if [ "$wp_detected" = "true" ]; then
-        run_wpscan_scan "$TARGET" "${open_ports[@]}" &
+        run_wpscan_scan "$TARGET" $open_ports &
         wpscan_pids+=($!)  # Append the PID of the WPScan process to the array
     fi
 
     # Run SQLMap only if an SQL database was detected
     if [ "$sql_detected" = true ]; then
-        run_sqlmap_scan "$TARGET" "${open_ports[@]}" &
+        run_sqlmap_scan "$TARGET" $open_ports &
         sqlmap_pids+=($!)  # Append the PID of the SQLMap process to the array
     fi
 fi
@@ -1089,14 +1093,6 @@ done
 for pid in "${sqlmap_pids[@]}"; do
     wait $pid || true
 done
-
-# Wait for other background processes if any
-wait $nmap_pid
-
-# Merge results
-readonly FINAL_OUTPUT_FILE="${SCAN_DIR}/${TARGET}_${DATE_TIME}_final_scan_output.txt"
-output_file="${SCAN_DIR}/${target_ip}_${group_name}_${ip_version}_scan_output.txt"
-cat ./*_scan_output.txt > "$FINAL_OUTPUT_FILE"
 
 # Print final status messages
 print_status "$(date '+[%Y-%m-%d %H:%M:%S]') Scanning complete for $TARGET."
