@@ -1294,28 +1294,28 @@ fi
 # Wait for all Wapiti processes to complete and handle errors
 for pid in "${wapiti_pids[@]}"; do
     wait $pid
-    local exit_code=$?
+    exit_code=$?
     handle_scanner_error "Wapiti" "$exit_code" "$TARGET" || true
 done
 
 # Wait for all Nikto processes to complete and handle errors
 for pid in "${nikto_pids[@]}"; do
     wait $pid
-    local exit_code=$?
+    exit_code=$?
     handle_scanner_error "Nikto" "$exit_code" "$TARGET" || true
 done
 
 # Wait for all WPScan processes to complete and handle errors
 for pid in "${wpscan_pids[@]}"; do
     wait $pid
-    local exit_code=$?
+    exit_code=$?
     handle_scanner_error "WPScan" "$exit_code" "$TARGET" || true
 done
 
 # Wait for all SQLMap processes to complete and handle errors
 for pid in "${sqlmap_pids[@]}"; do
     wait $pid
-    local exit_code=$?
+    exit_code=$?
     handle_scanner_error "SQLMap" "$exit_code" "$TARGET" || true
 done
 update_scan_stage "third_party_scans" "COMPLETED"
