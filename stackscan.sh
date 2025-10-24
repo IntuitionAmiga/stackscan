@@ -29,6 +29,20 @@ STATS_OPEN_PORTS=0
 STATS_VULNERABILITIES=0
 STATS_CVES=0
 
+# Phase 3: Progress tracking and error handling
+STATS_FAILED_SCANS=0
+declare -A SCAN_STAGE_STATUS=(
+    [initialization]="PENDING"
+    [nmap_ipv4]="PENDING"
+    [nmap_ipv6]="PENDING"
+    [port_detection]="PENDING"
+    [third_party_scans]="PENDING"
+    [vulnerability_analysis]="PENDING"
+    [report_generation]="PENDING"
+)
+CURRENT_SCAN_STAGE=""
+TOTAL_SCAN_STAGES=7
+
 readonly STACKSCAN_LOG_DIR="/var/log/stackscan"
 readonly STACKSCAN_DATA_DIR="/var/lib/stackscan"
 readonly STACKSCAN_TMP_DIR="/tmp/stackscan"
@@ -165,6 +179,40 @@ run_with_timeout() {
     return $exit_code
 }
 
+# Phase 3: Handle scanner errors gracefully
+handle_scanner_error() {
+    local scanner_name="$1"
+    local exit_code="$2"
+    local target="$3"
+
+    if [ $exit_code -ne 0 ]; then
+        ((STATS_FAILED_SCANS++))
+        if [ $exit_code -eq 124 ]; then
+            log_message "WARNING" "${scanner_name} scan timed out on ${target}"
+            print_warning "$(date '+[%Y-%m-%d %H:%M:%S]') ${scanner_name} scan timed out on ${target} (continuing...)"
+        elif [ $exit_code -eq 127 ]; then
+            log_message "WARNING" "${scanner_name} command not found - skipping"
+            print_warning "$(date '+[%Y-%m-%d %H:%M:%S]') ${scanner_name} not installed - skipping scan"
+        else
+            log_message "WARNING" "${scanner_name} scan failed with exit code ${exit_code} on ${target}"
+            print_warning "$(date '+[%Y-%m-%d %H:%M:%S]') ${scanner_name} scan failed on ${target} (continuing...)"
+        fi
+        return 1
+    fi
+    return 0
+}
+
+# Phase 3: Check if external scanner tool is available
+check_scanner_available() {
+    local scanner="$1"
+    if ! command -v "$scanner" &> /dev/null; then
+        print_warning "$(date '+[%Y-%m-%d %H:%M:%S]') ${scanner} not found - skipping ${scanner} scans"
+        log_message "WARNING" "${scanner} not available in PATH"
+        return 1
+    fi
+    return 0
+}
+
 # ANSI color codes
 BOLD="\033[1m"
 CYAN="\033[36m"
@@ -221,6 +269,98 @@ print_warning() {
 # Function to print errors
 print_error() {
     log_message "ERROR" "$1"
+}
+
+# Phase 3: Progress tracking functions
+update_scan_stage() {
+    local stage="$1"
+    local status="$2"  # PENDING, IN_PROGRESS, COMPLETED, FAILED
+
+    SCAN_STAGE_STATUS[$stage]="$status"
+    CURRENT_SCAN_STAGE="$stage"
+
+    # Calculate progress percentage
+    local completed_stages=0
+    for s in "${!SCAN_STAGE_STATUS[@]}"; do
+        if [ "${SCAN_STAGE_STATUS[$s]}" = "COMPLETED" ]; then
+            ((completed_stages++))
+        fi
+    done
+    local progress_percent=$((completed_stages * 100 / TOTAL_SCAN_STAGES))
+
+    # Display progress
+    local stage_display=$(echo "$stage" | tr '_' ' ' | awk '{for(i=1;i<=NF;i++) $i=toupper(substr($i,1,1)) tolower(substr($i,2));}1')
+    if [ "$status" = "IN_PROGRESS" ]; then
+        print_status "$(date '+[%Y-%m-%d %H:%M:%S]') [${progress_percent}%] Stage: ${stage_display} - ${status}"
+    elif [ "$status" = "COMPLETED" ]; then
+        print_status "$(date '+[%Y-%m-%d %H:%M:%S]') [${progress_percent}%] Stage: ${stage_display} - ${status} ✓"
+    elif [ "$status" = "FAILED" ]; then
+        print_warning "$(date '+[%Y-%m-%d %H:%M:%S]') [${progress_percent}%] Stage: ${stage_display} - ${status} ✗"
+    fi
+}
+
+show_scan_progress() {
+    local completed=0
+    local failed=0
+    local in_progress=0
+    local pending=0
+
+    for stage in "${!SCAN_STAGE_STATUS[@]}"; do
+        case "${SCAN_STAGE_STATUS[$stage]}" in
+            COMPLETED) ((completed++)) ;;
+            FAILED) ((failed++)) ;;
+            IN_PROGRESS) ((in_progress++)) ;;
+            PENDING) ((pending++)) ;;
+        esac
+    done
+
+    echo ""
+    echo "Scan Progress: $completed/$TOTAL_SCAN_STAGES stages completed"
+    if [ $failed -gt 0 ]; then
+        echo "Failed stages: $failed"
+    fi
+}
+
+# Configuration validation function
+validate_configuration() {
+    print_status "$(date '+[%Y-%m-%d %H:%M:%S]') Validating configuration..."
+
+    local validation_errors=0
+
+    # Validate port ranges
+    for group in WEB AUTH DATABASE COMMON VULN; do
+        local ports_var="${group}_PORTS"
+        local ports="${!ports_var}"
+        if [ -n "$ports" ]; then
+            # Check if ports contain valid numbers and commas
+            if ! [[ "$ports" =~ ^[0-9,]+$ ]]; then
+                print_error "Invalid port format in ${group}_PORTS: $ports"
+                ((validation_errors++))
+            fi
+        fi
+    done
+
+    # Validate Nmap scripts exist
+    for group in WEB AUTH DATABASE COMMON VULN; do
+        local scripts_var="${group}_NMAP_SCRIPTS[@]"
+        local scripts=("${!scripts_var}")
+        for script in "${scripts[@]}"; do
+            if [ -n "$script" ] && [[ ! "$script" =~ \* ]]; then
+                # Only validate non-wildcard scripts
+                if [ ! -f "/usr/share/nmap/scripts/${script}.nse" ]; then
+                    print_warning "Nmap script not found: ${script}.nse (will be skipped)"
+                fi
+            fi
+        done
+    done
+
+    if [ $validation_errors -gt 0 ]; then
+        print_error "Configuration validation failed with $validation_errors error(s)"
+        return 1
+    fi
+
+    print_status "$(date '+[%Y-%m-%d %H:%M:%S]') Configuration validation passed ✓"
+    return 0
 }
 
 # Load the configuration file early in the script
@@ -541,6 +681,11 @@ if [ "$LOG_LEVEL" = "VERBOSE" ]; then
 else
     log_message "WARNING" "$(date '+[%Y-%m-%d %H:%M:%S]') Verbose mode disabled. Only important logs will be printed."
 fi
+
+# Phase 3: Initialize scan stages
+update_scan_stage "initialization" "IN_PROGRESS"
+validate_configuration || exit 1
+update_scan_stage "initialization" "COMPLETED"
 
 # Spinner function
 spinner() {
@@ -1059,22 +1204,31 @@ detect_services() {
     echo "$wp_detected $sql_detected"
 }
 
-# Run for IPv4 and capture the web and database scan PIDs
+# Phase 3: Start Nmap IPv4 scans
+update_scan_stage "nmap_ipv4" "IN_PROGRESS"
 run_scans "IPv4" "$TARGET"
 web_scan_pid_v4=$web_scan_pid
 database_scan_pid_v4=$database_scan_pid
 
 # Run for IPv6 only if supported and the target is not an IPv4 address, capture the web scan PID
 if [ "$IPV6_SUPPORTED" = true ] && [ "$TARGET_TYPE" != "IPv4" ]; then
+   update_scan_stage "nmap_ipv6" "IN_PROGRESS"
    run_scans "IPv6" "$TARGET"
    web_scan_pid_v6=$web_scan_pid
+else
+   update_scan_stage "nmap_ipv6" "COMPLETED"
 fi
 
 # Wait for the web-related Nmap scans to finish so that we can extract the web server port numbers
 wait "$web_scan_pid_v4" || true
 [ -n "$web_scan_pid_v6" ] && wait "$web_scan_pid_v6" || true
+update_scan_stage "nmap_ipv4" "COMPLETED"
+if [ "$IPV6_SUPPORTED" = true ] && [ "$TARGET_TYPE" != "IPv4" ]; then
+   update_scan_stage "nmap_ipv6" "COMPLETED"
+fi
 
-# Extract any open web server ports and scan them with Wapiti and Nikto
+# Phase 3: Port detection stage
+update_scan_stage "port_detection" "IN_PROGRESS"
 open_ports=$(get_open_web_ports)
 
 # Initialize associative array
@@ -1088,6 +1242,7 @@ open_ports="${!unique_ports[@]}"
 
 # Track statistics: count open ports
 STATS_OPEN_PORTS=$(echo "$open_ports" | wc -w)
+update_scan_stage "port_detection" "COMPLETED"
 
 # Initialize arrays to hold PIDs
 wapiti_pids=()
@@ -1095,20 +1250,27 @@ nikto_pids=()
 wpscan_pids=()
 sqlmap_pids=()
 
+# Phase 3: Start third-party scans
+update_scan_stage "third_party_scans" "IN_PROGRESS"
+
 # If no open ports found, skip all scans
 if [ -n "$open_ports" ]; then
-    # Run Wapiti scans in parallel
-    run_wapiti_scan "$TARGET" $open_ports &
-    wapiti_pids+=($!)  # Append the PID of the Wapiti process to the array
+    # Run Wapiti scans in parallel (with availability check)
+    if check_scanner_available "wapiti"; then
+        run_wapiti_scan "$TARGET" $open_ports &
+        wapiti_pids+=($!)  # Append the PID of the Wapiti process to the array
+    fi
 
-    # Run Nikto scans in parallel
-    run_nikto_scan "$TARGET" $open_ports &
-    nikto_pids+=($!)  # Append the PID of the Nikto process to the array
+    # Run Nikto scans in parallel (with availability check)
+    if check_scanner_available "nikto"; then
+        run_nikto_scan "$TARGET" $open_ports &
+        nikto_pids+=($!)  # Append the PID of the Nikto process to the array
+    fi
 
     # Wait for the database-related Nmap scans to finish
-    wait "$database_scan_pid_v4"
+    wait "$database_scan_pid_v4" || true
     if [ -n "$database_scan_pid_v6" ]; then
-        wait "$database_scan_pid_v6"
+        wait "$database_scan_pid_v6" || true
     fi
 
     # Detect services after database scan
@@ -1116,38 +1278,47 @@ if [ -n "$open_ports" ]; then
     wp_detected=$(echo "$services_detection" | awk '{print $1}')
     sql_detected=$(echo "$services_detection" | awk '{print $2}')
 
-    # Run WPScan only if WordPress was detected
-    if [ "$wp_detected" = "true" ]; then
+    # Run WPScan only if WordPress was detected (with availability check)
+    if [ "$wp_detected" = "true" ] && check_scanner_available "wpscan"; then
         run_wpscan_scan "$TARGET" $open_ports &
         wpscan_pids+=($!)  # Append the PID of the WPScan process to the array
     fi
 
-    # Run SQLMap only if an SQL database was detected
-    if [ "$sql_detected" = true ]; then
+    # Run SQLMap only if an SQL database was detected (with availability check)
+    if [ "$sql_detected" = true ] && check_scanner_available "sqlmap"; then
         run_sqlmap_scan "$TARGET" $open_ports &
         sqlmap_pids+=($!)  # Append the PID of the SQLMap process to the array
     fi
 fi
 
-# Wait for all Wapiti processes to complete
+# Wait for all Wapiti processes to complete and handle errors
 for pid in "${wapiti_pids[@]}"; do
-    wait $pid || true
+    wait $pid
+    local exit_code=$?
+    handle_scanner_error "Wapiti" "$exit_code" "$TARGET" || true
 done
 
-# Wait for all Nikto processes to complete
+# Wait for all Nikto processes to complete and handle errors
 for pid in "${nikto_pids[@]}"; do
-    wait $pid || true
+    wait $pid
+    local exit_code=$?
+    handle_scanner_error "Nikto" "$exit_code" "$TARGET" || true
 done
 
-# Wait for all WPScan processes to complete
+# Wait for all WPScan processes to complete and handle errors
 for pid in "${wpscan_pids[@]}"; do
-    wait $pid || true
+    wait $pid
+    local exit_code=$?
+    handle_scanner_error "WPScan" "$exit_code" "$TARGET" || true
 done
 
-# Wait for all SQLMap processes to complete
+# Wait for all SQLMap processes to complete and handle errors
 for pid in "${sqlmap_pids[@]}"; do
-    wait $pid || true
+    wait $pid
+    local exit_code=$?
+    handle_scanner_error "SQLMap" "$exit_code" "$TARGET" || true
 done
+update_scan_stage "third_party_scans" "COMPLETED"
 
 # Function to print scan statistics summary
 print_scan_summary() {
@@ -1184,7 +1355,9 @@ print_scan_summary() {
     echo "  - Vulnerabilities: $STATS_VULNERABILITIES"
     echo "  - CVEs:            $STATS_CVES"
     echo ""
-    echo "Total Scans Performed: $total_scans"
+    echo "Scan Status:"
+    echo "  - Total Scans:     $total_scans"
+    echo "  - Failed Scans:    $STATS_FAILED_SCANS"
     echo "=========================================="
     echo ""
 }
@@ -1219,7 +1392,10 @@ count_findings() {
     STATS_CVES=$cve_count
 }
 
+# Phase 3: Vulnerability analysis stage
+update_scan_stage "vulnerability_analysis" "IN_PROGRESS"
 count_findings
+update_scan_stage "vulnerability_analysis" "COMPLETED"
 
 # Calculate scan duration before displaying summary
 scan_end_time=$(date +%s)
@@ -1286,7 +1462,8 @@ generate_json_report() {
       "vulnerabilities": $STATS_VULNERABILITIES,
       "cves": $STATS_CVES
     },
-    "total_scans": $((STATS_NMAP_SCANS[web] + STATS_NMAP_SCANS[auth] + STATS_NMAP_SCANS[database] + STATS_NMAP_SCANS[common] + STATS_NMAP_SCANS[vuln] + STATS_NMAP_SCANS[custom] + STATS_WAPITI_SCANS + STATS_NIKTO_SCANS + STATS_WPSCAN_SCANS + STATS_SQLMAP_SCANS))
+    "total_scans": $((STATS_NMAP_SCANS[web] + STATS_NMAP_SCANS[auth] + STATS_NMAP_SCANS[database] + STATS_NMAP_SCANS[common] + STATS_NMAP_SCANS[vuln] + STATS_NMAP_SCANS[custom] + STATS_WAPITI_SCANS + STATS_NIKTO_SCANS + STATS_WPSCAN_SCANS + STATS_SQLMAP_SCANS)),
+    "failed_scans": $STATS_FAILED_SCANS
   },
   "log_file": "$LOG_FILE",
   "html_report_file": "$HTML_REPORT_FILE"
@@ -1466,7 +1643,9 @@ generate_html_report() {
     echo "<tr><td style=\"padding: 8px; border: 1px solid #ddd;\">Open Ports</td><td style=\"padding: 8px; border: 1px solid #ddd;\">$STATS_OPEN_PORTS</td></tr>" >> "$HTML_REPORT_FILE"
     echo "<tr><td style=\"padding: 8px; border: 1px solid #ddd;\">Vulnerabilities</td><td style=\"padding: 8px; border: 1px solid #ddd;\">$STATS_VULNERABILITIES</td></tr>" >> "$HTML_REPORT_FILE"
     echo "<tr><td style=\"padding: 8px; border: 1px solid #ddd;\">CVEs</td><td style=\"padding: 8px; border: 1px solid #ddd;\">$STATS_CVES</td></tr>" >> "$HTML_REPORT_FILE"
-    echo "<tr style=\"background-color: #d0e8ff; font-weight: bold; font-size: 1.1em;\"><td style=\"padding: 10px; border: 1px solid #ddd;\">Total Scans Performed</td><td style=\"padding: 10px; border: 1px solid #ddd;\">$total_scans</td></tr>" >> "$HTML_REPORT_FILE"
+    echo "<tr style=\"background-color: #e6f2ff;\"><th colspan=\"2\" style=\"padding: 10px; text-align: left; border: 1px solid #ddd;\">Scan Status</th></tr>" >> "$HTML_REPORT_FILE"
+    echo "<tr style=\"background-color: #d0e8ff; font-weight: bold;\"><td style=\"padding: 8px; border: 1px solid #ddd;\">Total Scans Performed</td><td style=\"padding: 8px; border: 1px solid #ddd;\">$total_scans</td></tr>" >> "$HTML_REPORT_FILE"
+    echo "<tr style=\"background-color: #ffe6e6;\"><td style=\"padding: 8px; border: 1px solid #ddd;\">Failed Scans</td><td style=\"padding: 8px; border: 1px solid #ddd;\">$STATS_FAILED_SCANS</td></tr>" >> "$HTML_REPORT_FILE"
     echo "</table>" >> "$HTML_REPORT_FILE"
     echo "</div>" >> "$HTML_REPORT_FILE"
 
@@ -1648,6 +1827,9 @@ scan_end_time=$(date +%s)
 scan_duration=$((scan_end_time - scan_start_time))
 formatted_scan_duration=$(printf "%02d:%02d:%02d" $((scan_duration/3600)) $((scan_duration%3600/60)) $((scan_duration%60)))
 
+# Phase 3: Report generation stage
+update_scan_stage "report_generation" "IN_PROGRESS"
+
 # Generate HTML report if enabled
 if [ "$GENERATE_HTML_REPORT" = "true" ]; then
     generate_html_report
@@ -1655,6 +1837,8 @@ fi
 
 # Generate JSON report (always generated, but only output to console if --json flag is set)
 generate_json_report
+
+update_scan_stage "report_generation" "COMPLETED"
 
 # Ensure all created files are owned by the user running the script
 if [ -n "$SUDO_USER" ]; then
