@@ -12,6 +12,23 @@ fi
 
 scan_start_time=$(date +%s)
 
+# Global statistics tracking variables
+declare -A STATS_NMAP_SCANS=(
+    [web]=0
+    [auth]=0
+    [database]=0
+    [common]=0
+    [vuln]=0
+    [custom]=0
+)
+STATS_WAPITI_SCANS=0
+STATS_NIKTO_SCANS=0
+STATS_WPSCAN_SCANS=0
+STATS_SQLMAP_SCANS=0
+STATS_OPEN_PORTS=0
+STATS_VULNERABILITIES=0
+STATS_CVES=0
+
 readonly STACKSCAN_LOG_DIR="/var/log/stackscan"
 readonly STACKSCAN_DATA_DIR="/var/lib/stackscan"
 readonly STACKSCAN_TMP_DIR="/tmp/stackscan"
@@ -405,7 +422,40 @@ validate_target() {
 # Now load the configuration
 load_config
 
-TARGET="$1"
+# Initialize global variables for command-line options
+OUTPUT_JSON=false
+TARGET=""
+
+# Parse command-line arguments
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --json)
+            OUTPUT_JSON=true
+            shift
+            ;;
+        -*)
+            echo "Unknown option: $1" >&2
+            echo "Usage: $0 [--json] <domain_or_ip>" >&2
+            exit 1
+            ;;
+        *)
+            if [ -z "$TARGET" ]; then
+                TARGET="$1"
+            else
+                echo "Error: Multiple targets specified" >&2
+                exit 1
+            fi
+            shift
+            ;;
+    esac
+done
+
+# Check if target was provided
+if [ -z "$TARGET" ]; then
+    print_banner
+    echo "Usage: $0 [--json] <domain_or_ip>"
+    exit 1
+fi
 
 # Validate the target input
 validate_target "$TARGET"
@@ -444,16 +494,6 @@ if [ -n "$TARGET" ] && [ -n "$TARGET_TYPE" ]; then
   echo -e "$banner_text" | sed "s,\x1B\[[0-9;]*[a-zA-Z],,g" >> "$LOG_FILE"
 fi
 }
-
-# Check if the user provided an argument
-if [ -z "$1" ]; then
-  print_banner
-  echo "Usage: $0 [-v] <domain_or_ip>"
-  exit 1
-fi
-
-# Validate the target input
-validate_target "$TARGET"
 
 # Check required commands
 check_required_commands() {
@@ -642,6 +682,14 @@ run_scan_group() {
         done
 
     done
+
+    # Track statistics: count executed Nmap commands
+    if [ -f "$output_file" ]; then
+        local nmap_cmd_count
+        nmap_cmd_count=$(grep -c "Executing Nmap Command" "$output_file" 2>/dev/null || echo "0")
+        STATS_NMAP_SCANS[$group_name]=$((STATS_NMAP_SCANS[$group_name] + nmap_cmd_count))
+    fi
+
     print_status "$(date '+[%Y-%m-%d %H:%M:%S]') Nmap $group_name scan on $target_ip ($ip_version) completed."
     print_verbose "$(date '+[%Y-%m-%d %H:%M:%S]') Nmap $group_name scan on $target_ip ($ip_version) completed."
 }
@@ -788,6 +836,7 @@ run_wapiti_scan() {
 
     # Store the number of Wapiti scans
     echo "$wapiti_scan_count" > /tmp/wapiti_scan_count.txt
+    STATS_WAPITI_SCANS=$wapiti_scan_count
 
     print_status "$(date '+[%Y-%m-%d %H:%M:%S]') Wapiti scan on $target_ip:$port completed."
     print_verbose "$(date '+[%Y-%m-%d %H:%M:%S]') Wapiti scan on $target_ip:$port completed."
@@ -851,6 +900,7 @@ run_nikto_scan() {
 
     # Store the number of Nikto scans
     echo "$nikto_scan_count" > /tmp/nikto_scan_count.txt
+    STATS_NIKTO_SCANS=$nikto_scan_count
 
     print_status "$(date '+[%Y-%m-%d %H:%M:%S]') Nikto scan on $target_ip:$port completed."
     print_verbose "$(date '+[%Y-%m-%d %H:%M:%S]') Nikto scan on $target_ip:$port completed."
@@ -910,6 +960,7 @@ run_wpscan_scan() {
 
     # Store the number of WPScan scans
     echo "$wpscan_scan_count" > /tmp/wpscan_scan_count.txt
+    STATS_WPSCAN_SCANS=$wpscan_scan_count
 
     print_status "$(date '+[%Y-%m-%d %H:%M:%S]') WPScan scan on $target_ip:$port completed."
     print_verbose "$(date '+[%Y-%m-%d %H:%M:%S]') WPScan scan on $target_ip:$port completed."
@@ -969,6 +1020,7 @@ run_sqlmap_scan() {
 
     # Store the number of SQLMap scans
     echo "$sqlmap_scan_count" > /tmp/sqlmap_scan_count.txt
+    STATS_SQLMAP_SCANS=$sqlmap_scan_count
 
     print_status "$(date '+[%Y-%m-%d %H:%M:%S]') SQLMap scan on $target_ip:$port completed."
     print_verbose "$(date '+[%Y-%m-%d %H:%M:%S]') SQLMap scan on $target_ip:$port completed."
@@ -1034,6 +1086,9 @@ done
 # Convert deduped associative array back to a string list
 open_ports="${!unique_ports[@]}"
 
+# Track statistics: count open ports
+STATS_OPEN_PORTS=$(echo "$open_ports" | wc -w)
+
 # Initialize arrays to hold PIDs
 wapiti_pids=()
 nikto_pids=()
@@ -1094,9 +1149,80 @@ for pid in "${sqlmap_pids[@]}"; do
     wait $pid || true
 done
 
+# Function to print scan statistics summary
+print_scan_summary() {
+    local total_nmap=$((STATS_NMAP_SCANS[web] + STATS_NMAP_SCANS[auth] + STATS_NMAP_SCANS[database] + STATS_NMAP_SCANS[common] + STATS_NMAP_SCANS[vuln] + STATS_NMAP_SCANS[custom]))
+    local total_third_party=$((STATS_WAPITI_SCANS + STATS_NIKTO_SCANS + STATS_WPSCAN_SCANS + STATS_SQLMAP_SCANS))
+    local total_scans=$((total_nmap + total_third_party))
+
+    echo ""
+    echo "=========================================="
+    echo "           SCAN STATISTICS SUMMARY        "
+    echo "=========================================="
+    echo ""
+    echo "Target: $TARGET ($TARGET_TYPE)"
+    echo "Scan Duration: $formatted_scan_duration"
+    echo ""
+    echo "Nmap Scans:"
+    echo "  - Web:      ${STATS_NMAP_SCANS[web]}"
+    echo "  - Auth:     ${STATS_NMAP_SCANS[auth]}"
+    echo "  - Database: ${STATS_NMAP_SCANS[database]}"
+    echo "  - Common:   ${STATS_NMAP_SCANS[common]}"
+    echo "  - Vuln:     ${STATS_NMAP_SCANS[vuln]}"
+    echo "  - Custom:   ${STATS_NMAP_SCANS[custom]}"
+    echo "  Total Nmap: $total_nmap"
+    echo ""
+    echo "Third-Party Scans:"
+    echo "  - Wapiti:   $STATS_WAPITI_SCANS"
+    echo "  - Nikto:    $STATS_NIKTO_SCANS"
+    echo "  - WPScan:   $STATS_WPSCAN_SCANS"
+    echo "  - SQLMap:   $STATS_SQLMAP_SCANS"
+    echo "  Total:      $total_third_party"
+    echo ""
+    echo "Findings:"
+    echo "  - Open Ports:      $STATS_OPEN_PORTS"
+    echo "  - Vulnerabilities: $STATS_VULNERABILITIES"
+    echo "  - CVEs:            $STATS_CVES"
+    echo ""
+    echo "Total Scans Performed: $total_scans"
+    echo "=========================================="
+    echo ""
+}
+
 # Print final status messages
 print_status "$(date '+[%Y-%m-%d %H:%M:%S]') Scanning complete for $TARGET."
 log_message "INFO" "$(date '+[%Y-%m-%d %H:%M:%S]') Log saved to: $LOG_FILE"
+
+# Count vulnerabilities and CVEs from scan results
+count_findings() {
+    local vuln_count=0
+    local cve_count=0
+
+    # Count vulnerabilities from all scan output files
+    for file in "${TARGET}"_*_scan_output.txt "${TARGET}"_*_wapiti_output.txt "${TARGET}"_*_nikto_output.txt "${TARGET}"_*_wpscan_output.txt "${TARGET}"_*_sqlmap_output.txt; do
+        if [ -f "$file" ] && [ -s "$file" ]; then
+            # Count lines containing vulnerability indicators
+            vuln_count=$((vuln_count + $(grep -ic -E "vuln|vulnerable|exploit|weakness|security" "$file" 2>/dev/null || echo "0")))
+        fi
+    done
+
+    # Count unique CVEs from all scan output files
+    local cve_list=""
+    for file in "${TARGET}"_*_scan_output.txt "${TARGET}"_*_wapiti_output.txt "${TARGET}"_*_nikto_output.txt "${TARGET}"_*_wpscan_output.txt "${TARGET}"_*_sqlmap_output.txt; do
+        if [ -f "$file" ] && [ -s "$file" ]; then
+            cve_list+=$(grep -oE "CVE-[0-9]+-[0-9]+" "$file" 2>/dev/null || echo "")$'\n'
+        fi
+    done
+    cve_count=$(echo "$cve_list" | sort -u | grep -c "CVE-" || echo "0")
+
+    STATS_VULNERABILITIES=$vuln_count
+    STATS_CVES=$cve_count
+}
+
+count_findings
+
+# Print scan statistics summary to console
+print_scan_summary
 
 readonly API_CALLS_FILE="/tmp/stackscan_api_calls"
 readonly API_RATE_LIMIT=30
@@ -1115,6 +1241,65 @@ check_rate_limit() {
 
     echo "$current_time" >> "$API_CALLS_FILE"
     return 0
+}
+
+# Function to generate JSON report
+generate_json_report() {
+    local json_file="${STACKSCAN_DATA_DIR}/reports/${TARGET_SAFE}_${DATE_TIME}_scan_report.json"
+
+    print_status "$(date '+[%Y-%m-%d %H:%M:%S]') Generating JSON report..."
+
+    # Create JSON structure
+    cat > "$json_file" <<EOF
+{
+  "scan_metadata": {
+    "target": "$TARGET",
+    "target_type": "$TARGET_TYPE",
+    "scan_date": "$(date '+%Y-%m-%d %H:%M:%S')",
+    "scan_start_time": "$scan_start_time",
+    "scan_end_time": "$scan_end_time",
+    "scan_duration": "$formatted_scan_duration",
+    "scan_duration_seconds": $scan_duration
+  },
+  "statistics": {
+    "nmap_scans": {
+      "web": ${STATS_NMAP_SCANS[web]},
+      "auth": ${STATS_NMAP_SCANS[auth]},
+      "database": ${STATS_NMAP_SCANS[database]},
+      "common": ${STATS_NMAP_SCANS[common]},
+      "vuln": ${STATS_NMAP_SCANS[vuln]},
+      "custom": ${STATS_NMAP_SCANS[custom]}
+    },
+    "third_party_scans": {
+      "wapiti": $STATS_WAPITI_SCANS,
+      "nikto": $STATS_NIKTO_SCANS,
+      "wpscan": $STATS_WPSCAN_SCANS,
+      "sqlmap": $STATS_SQLMAP_SCANS
+    },
+    "findings": {
+      "open_ports": $STATS_OPEN_PORTS,
+      "vulnerabilities": $STATS_VULNERABILITIES,
+      "cves": $STATS_CVES
+    },
+    "total_scans": $((STATS_NMAP_SCANS[web] + STATS_NMAP_SCANS[auth] + STATS_NMAP_SCANS[database] + STATS_NMAP_SCANS[common] + STATS_NMAP_SCANS[vuln] + STATS_NMAP_SCANS[custom] + STATS_WAPITI_SCANS + STATS_NIKTO_SCANS + STATS_WPSCAN_SCANS + STATS_SQLMAP_SCANS))
+  },
+  "log_file": "$LOG_FILE",
+  "html_report_file": "$HTML_REPORT_FILE"
+}
+EOF
+
+    # Set secure permissions
+    chmod 644 "$json_file"
+    if [ -n "$SUDO_USER" ]; then
+        chown "$SUDO_USER":"$SUDO_USER" "$json_file"
+    fi
+
+    log_message "INFO" "$(date '+[%Y-%m-%d %H:%M:%S]') JSON Report saved to: $json_file"
+
+    # If --json flag was used, output the JSON to console
+    if [ "$OUTPUT_JSON" = true ]; then
+        cat "$json_file"
+    fi
 }
 
 # Function to generate an HTML report with advanced features
@@ -1249,6 +1434,36 @@ generate_html_report() {
     echo "<h1>StackScan Report for $TARGET</h1>" >> "$HTML_REPORT_FILE"
     echo "<p><strong>Scan Date:</strong> $(date)</p>" >> "$HTML_REPORT_FILE"
     echo "<p><strong>Total Scanning Time:</strong> $formatted_scan_duration</p>" >> "$HTML_REPORT_FILE"
+
+    # Add statistics summary section
+    local total_nmap=$((STATS_NMAP_SCANS[web] + STATS_NMAP_SCANS[auth] + STATS_NMAP_SCANS[database] + STATS_NMAP_SCANS[common] + STATS_NMAP_SCANS[vuln] + STATS_NMAP_SCANS[custom]))
+    local total_third_party=$((STATS_WAPITI_SCANS + STATS_NIKTO_SCANS + STATS_WPSCAN_SCANS + STATS_SQLMAP_SCANS))
+    local total_scans=$((total_nmap + total_third_party))
+
+    echo "<div class=\"scan-section\" style=\"background-color: #f0f8ff; padding: 15px; border-radius: 10px;\">" >> "$HTML_REPORT_FILE"
+    echo "<h2>Scan Statistics Summary</h2>" >> "$HTML_REPORT_FILE"
+    echo "<table style=\"width: 100%; border-collapse: collapse;\">" >> "$HTML_REPORT_FILE"
+    echo "<tr style=\"background-color: #e6f2ff;\"><th colspan=\"2\" style=\"padding: 10px; text-align: left; border: 1px solid #ddd;\">Nmap Scans</th></tr>" >> "$HTML_REPORT_FILE"
+    echo "<tr><td style=\"padding: 8px; border: 1px solid #ddd;\">Web</td><td style=\"padding: 8px; border: 1px solid #ddd;\">${STATS_NMAP_SCANS[web]}</td></tr>" >> "$HTML_REPORT_FILE"
+    echo "<tr><td style=\"padding: 8px; border: 1px solid #ddd;\">Auth</td><td style=\"padding: 8px; border: 1px solid #ddd;\">${STATS_NMAP_SCANS[auth]}</td></tr>" >> "$HTML_REPORT_FILE"
+    echo "<tr><td style=\"padding: 8px; border: 1px solid #ddd;\">Database</td><td style=\"padding: 8px; border: 1px solid #ddd;\">${STATS_NMAP_SCANS[database]}</td></tr>" >> "$HTML_REPORT_FILE"
+    echo "<tr><td style=\"padding: 8px; border: 1px solid #ddd;\">Common</td><td style=\"padding: 8px; border: 1px solid #ddd;\">${STATS_NMAP_SCANS[common]}</td></tr>" >> "$HTML_REPORT_FILE"
+    echo "<tr><td style=\"padding: 8px; border: 1px solid #ddd;\">Vuln</td><td style=\"padding: 8px; border: 1px solid #ddd;\">${STATS_NMAP_SCANS[vuln]}</td></tr>" >> "$HTML_REPORT_FILE"
+    echo "<tr><td style=\"padding: 8px; border: 1px solid #ddd;\">Custom</td><td style=\"padding: 8px; border: 1px solid #ddd;\">${STATS_NMAP_SCANS[custom]}</td></tr>" >> "$HTML_REPORT_FILE"
+    echo "<tr style=\"font-weight: bold;\"><td style=\"padding: 8px; border: 1px solid #ddd;\">Total Nmap</td><td style=\"padding: 8px; border: 1px solid #ddd;\">$total_nmap</td></tr>" >> "$HTML_REPORT_FILE"
+    echo "<tr style=\"background-color: #e6f2ff;\"><th colspan=\"2\" style=\"padding: 10px; text-align: left; border: 1px solid #ddd;\">Third-Party Scans</th></tr>" >> "$HTML_REPORT_FILE"
+    echo "<tr><td style=\"padding: 8px; border: 1px solid #ddd;\">Wapiti</td><td style=\"padding: 8px; border: 1px solid #ddd;\">$STATS_WAPITI_SCANS</td></tr>" >> "$HTML_REPORT_FILE"
+    echo "<tr><td style=\"padding: 8px; border: 1px solid #ddd;\">Nikto</td><td style=\"padding: 8px; border: 1px solid #ddd;\">$STATS_NIKTO_SCANS</td></tr>" >> "$HTML_REPORT_FILE"
+    echo "<tr><td style=\"padding: 8px; border: 1px solid #ddd;\">WPScan</td><td style=\"padding: 8px; border: 1px solid #ddd;\">$STATS_WPSCAN_SCANS</td></tr>" >> "$HTML_REPORT_FILE"
+    echo "<tr><td style=\"padding: 8px; border: 1px solid #ddd;\">SQLMap</td><td style=\"padding: 8px; border: 1px solid #ddd;\">$STATS_SQLMAP_SCANS</td></tr>" >> "$HTML_REPORT_FILE"
+    echo "<tr style=\"font-weight: bold;\"><td style=\"padding: 8px; border: 1px solid #ddd;\">Total Third-Party</td><td style=\"padding: 8px; border: 1px solid #ddd;\">$total_third_party</td></tr>" >> "$HTML_REPORT_FILE"
+    echo "<tr style=\"background-color: #e6f2ff;\"><th colspan=\"2\" style=\"padding: 10px; text-align: left; border: 1px solid #ddd;\">Findings</th></tr>" >> "$HTML_REPORT_FILE"
+    echo "<tr><td style=\"padding: 8px; border: 1px solid #ddd;\">Open Ports</td><td style=\"padding: 8px; border: 1px solid #ddd;\">$STATS_OPEN_PORTS</td></tr>" >> "$HTML_REPORT_FILE"
+    echo "<tr><td style=\"padding: 8px; border: 1px solid #ddd;\">Vulnerabilities</td><td style=\"padding: 8px; border: 1px solid #ddd;\">$STATS_VULNERABILITIES</td></tr>" >> "$HTML_REPORT_FILE"
+    echo "<tr><td style=\"padding: 8px; border: 1px solid #ddd;\">CVEs</td><td style=\"padding: 8px; border: 1px solid #ddd;\">$STATS_CVES</td></tr>" >> "$HTML_REPORT_FILE"
+    echo "<tr style=\"background-color: #d0e8ff; font-weight: bold; font-size: 1.1em;\"><td style=\"padding: 10px; border: 1px solid #ddd;\">Total Scans Performed</td><td style=\"padding: 10px; border: 1px solid #ddd;\">$total_scans</td></tr>" >> "$HTML_REPORT_FILE"
+    echo "</table>" >> "$HTML_REPORT_FILE"
+    echo "</div>" >> "$HTML_REPORT_FILE"
 
     # Iterate over scan groups and IP versions
     for ip_version in IPv4 IPv6; do
@@ -1432,6 +1647,9 @@ formatted_scan_duration=$(printf "%02d:%02d:%02d" $((scan_duration/3600)) $((sca
 if [ "$GENERATE_HTML_REPORT" = "true" ]; then
     generate_html_report
 fi
+
+# Generate JSON report (always generated, but only output to console if --json flag is set)
+generate_json_report
 
 # Ensure all created files are owned by the user running the script
 if [ -n "$SUDO_USER" ]; then
