@@ -1221,6 +1221,11 @@ count_findings() {
 
 count_findings
 
+# Calculate scan duration before displaying summary
+scan_end_time=$(date +%s)
+scan_duration=$((scan_end_time - scan_start_time))
+formatted_scan_duration=$(printf "%02d:%02d:%02d" $((scan_duration/3600)) $((scan_duration%3600/60)) $((scan_duration%60)))
+
 # Print scan statistics summary to console
 print_scan_summary
 
